@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Rebuild Orca.app from source and install it into /Applications.
 # Usage: ./build.sh [--no-install]
+#
+# Environment:
+#   ORCA_INSTALL_DIR     destination for the copy step (default /Applications)
+#   ORCA_SIGN_IDENTITY   codesign identity (default "-", i.e. ad-hoc)
+#   ORCA_SWIFT_FLAGS     extra flags for swift build, e.g. --disable-sandbox in a sandbox
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,10 +13,12 @@ APP_NAME="Orca"
 BUILD_DIR="$DIR/build"
 APP="$BUILD_DIR/$APP_NAME.app"
 INSTALL_DIR="${ORCA_INSTALL_DIR:-/Applications}"
+SIGN_IDENTITY="${ORCA_SIGN_IDENTITY:--}"
 
+# shellcheck disable=SC2086 # intentional word splitting
 echo "▸ Compiling $APP_NAME"
-swift build -c release --package-path "$DIR"
-BIN="$(swift build -c release --package-path "$DIR" --show-bin-path)/$APP_NAME"
+swift build -c release --package-path "$DIR" ${ORCA_SWIFT_FLAGS:-}
+BIN="$(swift build -c release --package-path "$DIR" ${ORCA_SWIFT_FLAGS:-} --show-bin-path)/$APP_NAME"
 
 echo "▸ Assembling bundle"
 rm -rf "$APP"
@@ -21,8 +28,8 @@ cp "$DIR/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$DIR/Resources/Info.plist" "$APP/Contents/Info.plist"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
 
-echo "▸ Signing (ad-hoc)"
-codesign --force --sign - --identifier com.xu.orca "$APP" >/dev/null 2>&1
+echo "▸ Signing ($SIGN_IDENTITY)"
+codesign --force --sign "$SIGN_IDENTITY" --identifier com.xu.orca "$APP" >/dev/null 2>&1
 
 if [ "${1:-}" = "--no-install" ]; then
   echo "✅ $APP"
