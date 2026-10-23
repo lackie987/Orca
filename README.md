@@ -26,7 +26,8 @@ osascript -e 'quit app "Orca"'; open -a /Applications/Orca.app
 - 启动前检查端口，随后拉起 `dsh --profile web --port <port> --no-open`；服务就绪通常需要 3–6 秒，期间显示原生启动页。
 - 启动失败时显示原因，并提供「Try Again / Service Log / Settings…」。
 - 上次运行异常退出留下的服务进程会被下一次启动复用（不重新拉起，端口与登录 cookie 不变）。
-- 关闭窗口（⌘W）不退出应用，点 Dock 图标回到窗口；⌘Q 退出并停止服务。
+- 无红绿灯、无可见标题栏：页面整幅铺满窗口，顶部页面 header 就是拖拽区（高度按页面 header 实测，兜底 40px）；点按仍先交给网页，按钮不受影响。
+- 关闭窗口（⌘W）不退出应用，点 Dock 图标回到窗口；最小化 ⌘M；⌘Q 退出并停止服务。
 - 菜单栏：File / Edit / View / Service / Window / Help；Edit 走系统响应链，输入框的剪切复制粘贴正常。
 
 ## 快捷键
@@ -37,6 +38,7 @@ osascript -e 'quit app "Orca"'; open -a /Applications/Orca.app
 | 从服务器重新加载 | ⌥⌘R |
 | 实际大小 / 放大 / 缩小 | ⌘0 / ⌘+ / ⌘- |
 | 全屏 | ⌃⌘F |
+| 拖动窗口 | 按住页面顶部 header 拖动 |
 | 关闭窗口（应用保留） | ⌘W |
 | 最小化 | ⌘M |
 | 设置 | ⌘, |
@@ -89,7 +91,9 @@ build.sh                        编译 + 组装 + 安装
 
 ## 实现说明
 
-- **用 Web 运行时，而不是 Electron 桌面运行时**：DSH 页面把 `html[data-platform]` 当作「桌面壳」标志，会要求 `window.dshDesktop` 的原生键盘桥；WKWebView 没有这套桥，设了该属性反而会让 `dsh-client-ui-shortcuts` 启动失败。Orca 不设该属性，页面走浏览器路径；窗口使用系统标准标题栏，红绿灯不会压住页面内容。
+- **用 Web 运行时，而不是 Electron 桌面运行时**：DSH 页面把 `html[data-platform]` 当作「桌面壳」标志，会要求 `window.dshDesktop` 的原生键盘桥；WKWebView 没有这套桥，设了该属性反而会让 `dsh-client-ui-shortcuts` 启动失败。Orca 不设该属性，页面走浏览器路径。
+- **无红绿灯窗口**：窗口保留 `.titled + .fullSizeContentView` 以维持阴影、圆角、缩放与全屏，只隐藏三个标准窗口按钮；`WKWebView` 子类在顶部拖拽区内把拖动转成 `performDrag`，点击先调 `super.mouseDown` 再决定，页面按钮照常响应。
+- **拖拽区跟高**：注入脚本查找视口顶部、宽 ≥ 400、高 24–160 的 `<header>`，把实测高度上报给原生侧；找不到时用 40px 兜底。
 - **透明 WebView**：`WKWebView.drawsBackground = false` + `underPageBackgroundColor = .clear`，页面按自己的浅/深色绘制。
 - **主题**：页面把主题写在 `html[data-ds-theme-source]`，应用同步 `NSApp.appearance`，标题栏、菜单、原生对话框跟随页面明暗。
 - **文件选择**：注入 `__DSH_DIRECTORY_PICKER__`，用 `NSOpenPanel` 选择工作区目录。

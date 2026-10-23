@@ -20,7 +20,7 @@ final class WebPageController: NSObject {
         let userContentController = WKUserContentController()
         configuration.userContentController = userContentController
 
-        webView = WKWebView(frame: .zero, configuration: configuration)
+        webView = DraggableWebView(frame: .zero, configuration: configuration)
         super.init()
 
         webView.navigationDelegate = self
@@ -37,9 +37,13 @@ final class WebPageController: NSObject {
             WKUserScript(source: Self.documentStartScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
         userContentController.addUserScript(
+            WKUserScript(source: Self.dragZoneScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+        )
+        userContentController.addUserScript(
             WKUserScript(source: Self.documentEndScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )
         userContentController.add(WeakScriptMessageHandler(target: self), name: "themeSource")
+        userContentController.add(WeakScriptMessageHandler(target: self), name: "titleBar")
         userContentController.add(WeakScriptMessageHandler(target: self), name: "diagnostics")
         userContentController.addScriptMessageHandler(
             WeakReplyScriptMessageHandler(target: self),
@@ -199,6 +203,49 @@ final class WebPageController: NSObject {
     })();
     """#
 
+    /// Reports the page header height so the hidden title bar keeps a matching drag band.
+    private static let dragZoneScript = #"""
+    (function () {
+      function report() {
+        var height = 0;
+        var headers = document.querySelectorAll('header');
+        for (var index = 0; index < headers.length; index += 1) {
+          var rect = headers[index].getBoundingClientRect();
+          if (rect.top <= 2 && rect.height >= 24 && rect.height <= 160 && rect.width >= 400) {
+            height = Math.round(rect.height);
+            break;
+          }
+        }
+        try {
+          window.webkit.messageHandlers.titleBar.postMessage({ height: height });
+        } catch (error) {}
+      }
+
+      var timer = null;
+      function schedule() {
+        if (timer !== null) { return; }
+        timer = window.setTimeout(function () {
+          timer = null;
+          report();
+        }, 150);
+      }
+
+      function start() {
+        report();
+        window.setTimeout(report, 500);
+        window.setTimeout(report, 1500);
+        new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
+        window.addEventListener('resize', schedule);
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', start);
+      } else {
+        start();
+      }
+    })();
+    """#
+
     /// Mirrors the web UI theme source so native chrome follows the page palette.
     private static let documentEndScript = #"""
     (function () {
@@ -299,6 +346,12 @@ extension WebPageController: WKScriptMessageHandler {
             if let source = message.body as? String {
                 onThemeSource?(source)
             }
+        case "titleBar":
+            guard let payload = message.body as? [String: Any],
+                  let height = (payload["height"] as? NSNumber)?.doubleValue,
+                  height >= 24
+            else { return }
+            (webView as? DraggableWebView)?.dragZoneHeight = CGFloat(height)
         case "diagnostics":
             if let line = message.body as? String {
                 Self.appendDiagnostic(line)
