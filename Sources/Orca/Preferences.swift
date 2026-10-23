@@ -11,6 +11,8 @@ final class Preferences {
         static let keepServiceRunning = "keepServiceRunningAfterQuit"
         static let developerExtras = "developerExtras"
         static let pageZoom = "pageZoom"
+        static let titleBarMode = "titleBarMode"
+        static let splashBaseColor = "splashBaseColor"
     }
 
     private let defaults = UserDefaults.standard
@@ -23,6 +25,8 @@ final class Preferences {
             Key.keepServiceRunning: false,
             Key.developerExtras: false,
             Key.pageZoom: 1.0,
+            Key.titleBarMode: TitleBarMode.hover.rawValue,
+            Key.splashBaseColor: "",
         ])
     }
 
@@ -60,5 +64,17 @@ final class Preferences {
     var pageZoom: Double {
         get { defaults.double(forKey: Key.pageZoom) }
         set { defaults.set(newValue, forKey: Key.pageZoom) }
+    }
+
+    /// Window chrome preset written by the `dsh-orca-titlebar` plugin; `hover` (Helium-style bar) by default.
+    var titleBarMode: String {
+        get { defaults.string(forKey: Key.titleBarMode) ?? TitleBarMode.hover.rawValue }
+        set { defaults.set(newValue, forKey: Key.titleBarMode) }
+    }
+
+    /// Base colour published by the web theme for the startup surface; empty before the first report.
+    var splashBaseColor: String {
+        get { defaults.string(forKey: Key.splashBaseColor) ?? "" }
+        set { defaults.set(newValue, forKey: Key.splashBaseColor) }
     }
 }

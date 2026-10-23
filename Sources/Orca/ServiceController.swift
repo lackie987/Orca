@@ -64,44 +64,46 @@ final class ServiceController {
     }
 
     /// Restarts the service from scratch, discarding the current process.
+    ///
+    /// The window reports a restart as one continuous progress state: it never passes through the
+    /// stopped state, so the splash keeps its spinner instead of offering buttons mid-refresh.
     func restart() {
-        stop()
-        accessURL = nil
+        teardown()
+        state = .starting("Restarting the local service…")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            guard let self, self.state == .idle else { return }
-            self.start()
+            guard let self, self.state.isStarting else { return }
+            self.launchOnAvailablePort()
         }
     }
 
     /// Stops the service and clears the session record.
     func stop() {
+        teardown()
+        state = .idle
+    }
+
+    /// Kills the child process and forgets the recorded session without touching the visible state.
+    private func teardown() {
         isStopping = true
         stopChild()
-        if let pid = adoptedPid {
-            kill(pid, SIGTERM)
-            adoptedPid = nil
-        }
+        releaseAdopted()
         ServiceSessionStore.clear()
         accessURL = nil
-        state = .idle
     }
 
     /// Stops the service for application termination unless the user keeps it alive between launches.
     func shutdown() {
         guard !preferences.keepServiceRunningAfterQuit || accessURL == nil else { return }
         isStopping = true
-        readinessTimer?.invalidate()
-        deadlineTimer?.invalidate()
-        if let pid = adoptedPid {
-            kill(pid, SIGTERM)
-            adoptedPid = nil
+        cancelTimers()
+        if adoptedPid != nil {
+            releaseAdopted()
             ServiceSessionStore.clear()
         }
-        guard let child = process else {
+        guard let child = detachChild() else {
             ServiceSessionStore.clear()
             return
         }
-        process = nil
         if child.isRunning {
             child.terminate()
         }
@@ -113,6 +115,46 @@ final class ServiceController {
             kill(child.processIdentifier, SIGKILL)
         }
         ServiceSessionStore.clear()
+    }
+
+    // MARK: - Process bookkeeping
+
+    /// Stops the readiness and deadline timers.
+    private func cancelTimers() {
+        readinessTimer?.invalidate()
+        readinessTimer = nil
+        deadlineTimer?.invalidate()
+        deadlineTimer = nil
+    }
+
+    /// Detaches the child and its pipe without signalling it, leaving the caller to decide how.
+    @discardableResult
+    private func detachChild() -> Process? {
+        guard let child = process else { return nil }
+        process = nil
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stdoutPipe = nil
+        return child
+    }
+
+    /// Sends SIGTERM, then SIGKILL if the process is still alive after `grace` seconds.
+    private func terminate(_ child: Process, after grace: TimeInterval) {
+        if child.isRunning {
+            child.terminate()
+        }
+        let pid = child.processIdentifier
+        DispatchQueue.global().asyncAfter(deadline: .now() + grace) {
+            if kill(pid, 0) == 0 {
+                kill(pid, SIGKILL)
+            }
+        }
+    }
+
+    /// Terminates the process adopted from an earlier launch, if this session has one.
+    private func releaseAdopted() {
+        guard let pid = adoptedPid else { return }
+        kill(pid, SIGTERM)
+        adoptedPid = nil
     }
 
     // MARK: - Spawning
@@ -150,7 +192,7 @@ final class ServiceController {
     /// Chooses the configured port, or an ephemeral one when another process already listens there.
     private func launchOnAvailablePort() {
         let preferredPort = preferences.port
-        let port = Self.portIsInUse(preferredPort) ? 0 : preferredPort
+        let port = PortProbe.isInUse(preferredPort) ? 0 : preferredPort
         didFallBackToAutomaticPort = port == 0
         launch(port: port)
     }
@@ -165,14 +207,14 @@ final class ServiceController {
         state = .starting(port == 0 ? "Starting the local service…" : "Starting the local service on port \(port)…")
         openLog()
 
-        let configuredCommand = Self.nonEmpty(preferences.command, fallback: "dsh")
-        guard let executable = Self.resolveCommand(configuredCommand) else {
+        let configuredCommand = ServiceCommand.nonEmpty(preferences.command, fallback: "dsh")
+        guard let executable = ServiceCommand.resolve(configuredCommand) else {
             closeLog()
             state = .failed("Orca can’t find “\(configuredCommand)”. Set its path in Settings (⌘,).")
             return
         }
-        let profile = Self.nonEmpty(preferences.profile, fallback: "web")
-        let script = "exec \(Self.shellQuote(executable)) --profile \(Self.shellQuote(profile)) --port \(port) --no-open"
+        let profile = ServiceCommand.nonEmpty(preferences.profile, fallback: "web")
+        let script = ServiceCommand.script(executable: executable, profile: profile, port: port)
 
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -210,36 +252,17 @@ final class ServiceController {
 
     /// Terminates the child without changing the visible state.
     private func stopChild() {
-        readinessTimer?.invalidate()
-        readinessTimer = nil
-        deadlineTimer?.invalidate()
-        deadlineTimer = nil
-        guard let child = process else { return }
-        process = nil
-        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
-        stdoutPipe = nil
-        if child.isRunning {
-            child.terminate()
-        }
-        let pid = child.processIdentifier
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-            if kill(pid, 0) == 0 {
-                kill(pid, SIGKILL)
-            }
-        }
+        cancelTimers()
+        guard let child = detachChild() else { return }
+        terminate(child, after: 2)
         ServiceSessionStore.clear()
         closeLog()
     }
 
     private func processDidExit(_ child: Process) {
         guard process === child else { return }
-        process = nil
-        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
-        stdoutPipe = nil
-        readinessTimer?.invalidate()
-        readinessTimer = nil
-        deadlineTimer?.invalidate()
-        deadlineTimer = nil
+        detachChild()
+        cancelTimers()
         closeLog()
 
         guard !isStopping else { return }
@@ -363,20 +386,8 @@ final class ServiceController {
     // MARK: - Log
 
     private func openLog() {
-        let manager = FileManager.default
-        if !manager.fileExists(atPath: AppPaths.serviceLog.path) {
-            manager.createFile(atPath: AppPaths.serviceLog.path, contents: nil)
-        }
-        if let attributes = try? manager.attributesOfItem(atPath: AppPaths.serviceLog.path),
-           let size = attributes[.size] as? Int,
-           size > 4_000_000 {
-            try? manager.removeItem(at: AppPaths.serviceLog)
-            manager.createFile(atPath: AppPaths.serviceLog.path, contents: nil)
-        }
-        logHandle = try? FileHandle(forWritingTo: AppPaths.serviceLog)
-        logHandle?.seekToEndOfFile()
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        logHandle?.write(Data("\n==== Orca launch \(stamp) ====\n".utf8))
+        logHandle = LogFile.openForAppending(AppPaths.serviceLog, rotatingBeyond: 4_000_000)
+        logHandle?.write(Data("\n==== Orca launch \(LogFile.stamp()) ====\n".utf8))
     }
 
     private func closeLog() {
@@ -388,6 +399,7 @@ final class ServiceController {
 
     // MARK: - Helpers
 
+    /// Pulls the tokenized access URL out of the server banner (`dsh web: http://…`).
     private static func parseAccessURL(in text: String) -> URL? {
         let pattern = #"dsh web:\s+(http://\S+)"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
@@ -397,66 +409,5 @@ final class ServiceController {
             return nil
         }
         return URL(string: String(text[range]))
-    }
-
-    private static func nonEmpty(_ value: String, fallback: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? fallback : trimmed
-    }
-
-    /// Resolves a configured command name through the search path a GUI launch actually sees.
-    ///
-    /// Applications launched by LaunchServices inherit launchd's minimal `PATH`, which omits the
-    /// npm global prefix; a bare `dsh` therefore has to be looked up in the common install roots.
-    private static func resolveCommand(_ configured: String) -> String? {
-        let trimmed = configured.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if trimmed.hasPrefix("/") || trimmed.hasPrefix("~") {
-            let expanded = (trimmed as NSString).expandingTildeInPath
-            return FileManager.default.isExecutableFile(atPath: expanded) ? expanded : nil
-        }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        var directories = [
-            "\(home)/.npm-global/bin",
-            "\(home)/.local/bin",
-            "\(home)/.bun/bin",
-            "\(home)/.cargo/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-        ]
-        let environmentPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        directories.append(contentsOf: environmentPath.split(separator: ":").map(String.init))
-        for directory in directories {
-            let candidate = "\(directory)/\(trimmed)"
-            if FileManager.default.isExecutableFile(atPath: candidate) {
-                return candidate
-            }
-        }
-        return nil
-    }
-
-    /// Returns true when a TCP listener already accepts connections on the loopback port.
-    private static func portIsInUse(_ port: Int) -> Bool {
-        guard port > 0 else { return false }
-        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { return false }
-        defer { close(descriptor) }
-        var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = in_port_t(UInt16(port).bigEndian)
-        address.sin_addr.s_addr = inet_addr("127.0.0.1")
-        let result = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        return result == 0
-    }
-
-    /// Wraps one shell word in single quotes, escaping embedded quotes.
-    private static func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
