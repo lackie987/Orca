@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Rebuild Orca.app from source and install it into /Applications.
+# Usage: ./build.sh [--no-install]
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_NAME="Orca"
+BUILD_DIR="$DIR/build"
+APP="$BUILD_DIR/$APP_NAME.app"
+INSTALL_DIR="${ORCA_INSTALL_DIR:-/Applications}"
+
+echo "▸ Compiling $APP_NAME"
+swift build -c release --package-path "$DIR"
+BIN="$(swift build -c release --package-path "$DIR" --show-bin-path)/$APP_NAME"
+
+echo "▸ Assembling bundle"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
+cp "$DIR/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$DIR/Resources/Info.plist" "$APP/Contents/Info.plist"
+printf 'APPL????' >"$APP/Contents/PkgInfo"
+
+echo "▸ Signing (ad-hoc)"
+codesign --force --sign - --identifier com.xu.orca "$APP" >/dev/null 2>&1
+
+if [ "${1:-}" = "--no-install" ]; then
+  echo "✅ $APP"
+  exit 0
+fi
+
+echo "▸ Installing to $INSTALL_DIR"
+rm -rf "$INSTALL_DIR/$APP_NAME.app"
+ditto "$APP" "$INSTALL_DIR/$APP_NAME.app"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$INSTALL_DIR/$APP_NAME.app" >/dev/null 2>&1 || true
+echo "✅ $INSTALL_DIR/$APP_NAME.app"
