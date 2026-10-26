@@ -2,9 +2,6 @@ import AppKit
 
 /// The main Orca window: vibrancy backdrop, web UI, native drag regions and the startup splash.
 final class MainWindowController: NSWindowController, NSWindowDelegate {
-    /// Invoked when the splash or a menu asks for the settings panel.
-    var onRequestSettings: (() -> Void)?
-
     private let service: ServiceController
     private let preferences: Preferences
     private let page: WebPageController
@@ -42,8 +39,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             self?.chrome.apply(mode)
         }
 
-        // Apply the persisted preset at launch so the native hover bar (the default) shows immediately.
+        // Apply the persisted preset at launch so the traffic lights are correct from the first frame.
         chrome.apply(preferences.titleBarMode)
+        // AppKit lays the titlebar out once the window is on screen; align after that first pass.
+        DispatchQueue.main.async { [weak self] in
+            self?.chrome.alignTrafficLights()
+        }
 
         // Paint the last base colour the theme published before the service has even started, so
         // the startup surface already belongs to the page's own plane.
@@ -148,12 +149,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Window delegate
 
+    func windowDidResize(_ notification: Notification) {
+        // AppKit re-places the standard buttons on every titlebar layout.
+        chrome.alignTrafficLights()
+    }
+
     func windowDidEnterFullScreen(_ notification: Notification) {
         page.applyFullscreen(true)
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
         page.applyFullscreen(false)
+        DispatchQueue.main.async { [weak self] in
+            self?.chrome.alignTrafficLights()
+        }
     }
 
     // MARK: - Construction
@@ -183,7 +192,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.contentView = container
         contentBackdrop = container
 
-        splash.iconCornerRadius = WindowMetrics.cornerRadius(for: window)
         Layout.fill(page.webView, splash, in: container)
     }
 
@@ -200,9 +208,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         splash.onOpenLog = {
             NSWorkspace.shared.open(AppPaths.serviceLog)
         }
-        splash.onOpenSettings = { [weak self] in
-            self?.onRequestSettings?()
-        }
         page.onPaletteBase = { [weak self] hex in
             self?.applySplashBase(hex)
         }
@@ -212,13 +217,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         page.onPageLoadFailed = { [weak self] in
             self?.revealPage()
         }
+        page.onCloseWindow = { [weak self] in
+            self?.window?.performClose(nil)
+        }
     }
 
     /// Stores the base colour a theme published and repaints the splash surface with it.
     private func applySplashBase(_ hex: String) {
         guard let color = ColorHex.color(hex) else { return }
+        let changed = preferences.splashBaseColor != hex
         preferences.splashBaseColor = hex
         paintBase(color)
+        // A template icon that follows the theme is painted in this very colour, so a plane switch
+        // has to re-derive it — otherwise the icon keeps the previous theme's background until the
+        // icon settings are touched again.
+        if changed, AppIcon.followsBaseColor(preferences) {
+            AppIconInstaller.refreshDock(preferences)
+        }
     }
 
     /// Puts the theme base behind both the page and the startup surface.

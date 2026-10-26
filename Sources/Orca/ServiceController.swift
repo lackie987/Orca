@@ -39,7 +39,17 @@ final class ServiceController {
     private var recentLines: [String] = []
     private var readinessTimer: Timer?
     private var deadlineTimer: Timer?
-    private var didFallBackToAutomaticPort = false
+    /// Identifies the pending delayed launch, so a newer restart wins.
+    private var restartToken = 0
+    /// Caps the automatic relaunch after an unexpected child exit at one attempt, so a service that
+    /// dies on boot ends in a readable failure instead of a restart loop.
+    private var didRelaunchAfterCrash = false
+    private var adoptionTimer: Timer?
+    /// Watches the service adopted from an earlier launch. It has no `Process` object, so without
+    /// this nothing notices it going away and the page retries a dead port for the whole session.
+    private var adoptionWatchdog: Timer?
+    /// Consecutive failed probes of the adopted service; one miss is a busy moment, three are death.
+    private var adoptedMisses = 0
     private var isStopping = false
     private var adoptedPid: Int32?
     private var didDiscoverAccessURL = false
@@ -51,11 +61,14 @@ final class ServiceController {
     deinit {
         readinessTimer?.invalidate()
         deadlineTimer?.invalidate()
+        adoptionTimer?.invalidate()
+        adoptionWatchdog?.invalidate()
     }
 
     /// Starts the service, adopting a recorded one from an earlier launch when it still answers.
     func start() {
         guard process == nil, !state.isStarting else { return }
+        didRelaunchAfterCrash = false
         if adoptRecordedService() {
             return
         }
@@ -66,12 +79,17 @@ final class ServiceController {
     /// Restarts the service from scratch, discarding the current process.
     ///
     /// The window reports a restart as one continuous progress state: it never passes through the
-    /// stopped state, so the splash keeps its spinner instead of offering buttons mid-refresh.
+    /// stopped state, so the splash keeps its spinner instead of offering buttons mid-refresh. The
+    /// delayed launch is keyed to this call rather than to the visible state, so a state change
+    /// inside the pause cannot leave the window spinning with no process and no deadline.
     func restart() {
         teardown()
+        didRelaunchAfterCrash = false
         state = .starting("Restarting the local service…")
+        restartToken += 1
+        let token = restartToken
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            guard let self, self.state.isStarting else { return }
+            guard let self, self.restartToken == token, self.process == nil else { return }
             self.launchOnAvailablePort()
         }
     }
@@ -119,12 +137,14 @@ final class ServiceController {
 
     // MARK: - Process bookkeeping
 
-    /// Stops the readiness and deadline timers.
+    /// Stops the readiness, deadline and adoption timers.
     private func cancelTimers() {
         readinessTimer?.invalidate()
         readinessTimer = nil
         deadlineTimer?.invalidate()
         deadlineTimer = nil
+        adoptionTimer?.invalidate()
+        adoptionTimer = nil
     }
 
     /// Detaches the child and its pipe without signalling it, leaving the caller to decide how.
@@ -152,9 +172,63 @@ final class ServiceController {
 
     /// Terminates the process adopted from an earlier launch, if this session has one.
     private func releaseAdopted() {
+        stopAdoptionWatchdog()
         guard let pid = adoptedPid else { return }
         kill(pid, SIGTERM)
         adoptedPid = nil
+    }
+
+    // MARK: - Adopted service
+
+    /// Watches a service adopted from an earlier launch.
+    ///
+    /// Only a child this process spawned reports its own exit; an adopted one does not, and that is
+    /// the gap that left the page spinning on "reconnecting": the shell kept the window, the window
+    /// kept retrying, and nothing ever learned the server was gone. Process liveness and the loopback
+    /// port are both checked, because a server can outlive its listener.
+    private func watchAdoptedService(pid: Int32, port: Int) {
+        stopAdoptionWatchdog()
+        adoptionWatchdog = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+            guard let self, adoptedPid == pid else {
+                timer.invalidate()
+                return
+            }
+            if kill(pid, 0) == 0, PortProbe.isInUse(port) {
+                adoptedMisses = 0
+                return
+            }
+            adoptedMisses += 1
+            guard adoptedMisses >= 3 else { return }
+            stopAdoptionWatchdog()
+            adoptedServiceExited()
+        }
+    }
+
+    /// Stops watching the adopted service and forgets how many probes it has missed.
+    private func stopAdoptionWatchdog() {
+        adoptionWatchdog?.invalidate()
+        adoptionWatchdog = nil
+        adoptedMisses = 0
+    }
+
+    /// Handles a lost adopted service the way a crashed child is handled: relaunch once, then fail.
+    ///
+    /// The relaunch mints a new token, so the window loads the page again against a live server
+    /// instead of leaving the old document retrying a dead one.
+    private func adoptedServiceExited() {
+        guard !isStopping, adoptedPid != nil else { return }
+        adoptedPid = nil
+        accessURL = nil
+        ServiceSessionStore.clear()
+        guard !didRelaunchAfterCrash else {
+            state = .failed(
+                "The local service from the previous launch stopped answering. Start it again to reconnect."
+            )
+            return
+        }
+        didRelaunchAfterCrash = true
+        note("the adopted local service stopped answering; relaunching once")
+        launchOnAvailablePort()
     }
 
     // MARK: - Spawning
@@ -162,7 +236,9 @@ final class ServiceController {
     /// Adopts a service started by an earlier launch when its process and access URL are still healthy.
     ///
     /// Reusing the recorded process keeps the window origin stable, so the web UI keeps its
-    /// localStorage state, and it also reclaims a server that survived a crash.
+    /// localStorage state, and it also reclaims a server that survived a crash. The probe has its own
+    /// timeout: a recorded URL that answers nothing must not leave the window on the startup
+    /// spinner, because no child process exists for the launch deadline to watch.
     private func adoptRecordedService() -> Bool {
         guard let session = ServiceSessionStore.load(),
               session.pid > 0,
@@ -173,12 +249,18 @@ final class ServiceController {
         }
         accessURL = url
         state = .starting("Reconnecting to the local service…")
-        checkHealth(url) { [weak self] healthy in
+        var settled = false
+        let settle = { [weak self] (healthy: Bool) in
             DispatchQueue.main.async {
-                guard let self, self.process == nil else { return }
+                guard let self, !settled else { return }
+                settled = true
+                self.adoptionTimer?.invalidate()
+                self.adoptionTimer = nil
+                guard self.process == nil else { return }
                 if healthy {
                     self.adoptedPid = session.pid
                     self.state = .ready(url)
+                    self.watchAdoptedService(pid: session.pid, port: url.port ?? self.preferences.port)
                 } else {
                     self.accessURL = nil
                     ServiceSessionStore.clear()
@@ -186,31 +268,69 @@ final class ServiceController {
                 }
             }
         }
+        checkHealth(url, completion: settle)
+        adoptionTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { _ in
+            settle(false)
+        }
         return true
     }
 
-    /// Chooses the configured port, or an ephemeral one when another process already listens there.
+    /// Chooses the configured port, reclaiming it first when a leftover service still holds it.
+    ///
+    /// The window origin is what keys `localStorage`, so falling back to an ephemeral port hands
+    /// every plugin an empty store. A `dsh web` left behind by an earlier launch is therefore asked
+    /// to exit instead; only a foreign owner justifies the drift, and then it is reported.
     private func launchOnAvailablePort() {
         let preferredPort = preferences.port
-        let port = PortProbe.isInUse(preferredPort) ? 0 : preferredPort
-        didFallBackToAutomaticPort = port == 0
-        launch(port: port)
+        guard preferredPort > 0 else {
+            launch(port: 0)
+            return
+        }
+        guard PortProbe.isInUse(preferredPort) else {
+            launch(port: preferredPort)
+            return
+        }
+        state = .starting("Freeing port \(preferredPort)…")
+        // The reclaim runs before any child exists, so nothing else would notice a hang here.
+        armDeadline(seconds: 45)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let outcome = PortOwner.reclaim(preferredPort)
+            DispatchQueue.main.async {
+                guard let self, self.state.isStarting else { return }
+                switch outcome {
+                case .free:
+                    self.launch(port: preferredPort)
+                case .reclaimed(let pid):
+                    self.note("reclaimed port \(preferredPort) from a leftover service (pid \(pid))")
+                    self.launch(port: preferredPort)
+                case .foreign(let owner):
+                    self.note("port \(preferredPort) is held by \(owner); falling back to a free port")
+                    self.launch(
+                        port: 0,
+                        notice: "\(owner) holds port \(preferredPort), so plugins start from their defaults."
+                    )
+                }
+            }
+        }
     }
 
     /// Runs `dsh web` through the login shell so PATH and profile environment match a terminal.
-    private func launch(port: Int) {
+    /// - Parameters:
+    ///   - port: the port to listen on; `0` lets the kernel pick one.
+    ///   - notice: an extra sentence shown next to the progress line, e.g. why the port changed.
+    private func launch(port: Int, notice: String? = nil) {
         isStopping = false
         accessURL = nil
         outputBuffer = ""
         recentLines.removeAll()
         didDiscoverAccessURL = false
-        state = .starting(port == 0 ? "Starting the local service…" : "Starting the local service on port \(port)…")
+        state = .starting(Self.progressMessage(port: port, notice: notice))
         openLog()
 
         let configuredCommand = ServiceCommand.nonEmpty(preferences.command, fallback: "dsh")
         guard let executable = ServiceCommand.resolve(configuredCommand) else {
             closeLog()
-            state = .failed("Orca can’t find “\(configuredCommand)”. Set its path in Settings (⌘,).")
+            state = .failed("Orca can’t find “\(configuredCommand)”. Set its path in Orca Settings (⌥⌘,).")
             return
         }
         let profile = ServiceCommand.nonEmpty(preferences.profile, fallback: "web")
@@ -241,7 +361,7 @@ final class ServiceController {
             try child.run()
         } catch {
             closeLog()
-            state = .failed("Orca can’t launch “\(executable)”. Check the command in Settings (⌘,).")
+            state = .failed("Orca can’t launch “\(executable)”. Check the command in Orca Settings (⌥⌘,).")
             return
         }
 
@@ -267,9 +387,13 @@ final class ServiceController {
 
         guard !isStopping else { return }
 
-        if !didFallBackToAutomaticPort {
-            didFallBackToAutomaticPort = true
-            launch(port: 0)
+        // Retry on the configured port, not an ephemeral one: the port is the page origin, and
+        // drifting it would hand every plugin an empty localStorage. `launchOnAvailablePort`
+        // reclaims the port from the corpse if it is still held.
+        if !didRelaunchAfterCrash {
+            didRelaunchAfterCrash = true
+            note("the local service exited with status \(child.terminationStatus); relaunching once")
+            launchOnAvailablePort()
             return
         }
 
@@ -398,6 +522,27 @@ final class ServiceController {
     }
 
     // MARK: - Helpers
+
+    /// The one-line progress shown while the service boots.
+    /// - Parameters:
+    ///   - port: the port being used; `0` means the kernel picked one.
+    ///   - notice: an extra sentence appended when the port had to change.
+    /// - Returns: the message carried by the `starting` state.
+    private static func progressMessage(port: Int, notice: String?) -> String {
+        let base = port == 0
+            ? "Starting the local service…"
+            : "Starting the local service on port \(port)…"
+        guard let notice else { return base }
+        return "\(base) \(notice)"
+    }
+
+    /// Appends one line to the service log before that log's own handle is opened.
+    /// - Parameter line: the note to record, already phrased for a reader.
+    private func note(_ line: String) {
+        let handle = LogFile.openForAppending(AppPaths.serviceLog, rotatingBeyond: 4_000_000)
+        handle?.write(Data("[orca] \(line)\n".utf8))
+        try? handle?.close()
+    }
 
     /// Pulls the tokenized access URL out of the server banner (`dsh web: http://…`).
     private static func parseAccessURL(in text: String) -> URL? {

@@ -10,12 +10,21 @@ extension WebPageController: WKUIDelegate {
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        if let url = navigationAction.request.url,
-           let scheme = url.scheme?.lowercased(),
-           scheme == "http" || scheme == "https" {
-            NSWorkspace.shared.open(url)
+        guard let url = navigationAction.request.url else {
+            return openPopup(with: configuration)
         }
-        return nil
+        switch url.scheme?.lowercased() ?? "" {
+        case "", "about", "data", "blob":
+            // A popup that is still blank is a work tab: the page opens it, then navigates it
+            // itself — DSH's sign-in does exactly that, so the shell has to give it a window.
+            return openPopup(with: configuration)
+        case "http", "https":
+            // A popup with a real destination is a link the page wants outside: the browser has it.
+            NSWorkspace.shared.open(url)
+            return nil
+        default:
+            return nil
+        }
     }
 
     func webView(
@@ -24,10 +33,7 @@ extension WebPageController: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping () -> Void
     ) {
-        let alert = NSAlert()
-        alert.messageText = message
-        alert.addButton(withTitle: "OK")
-        present(alert) { _ in completionHandler() }
+        present(JavaScriptPanels.alert(message)) { _ in completionHandler() }
     }
 
     func webView(
@@ -36,7 +42,7 @@ extension WebPageController: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping (Bool) -> Void
     ) {
-        present(confirmationAlert(message)) { response in
+        present(JavaScriptPanels.confirmation(message)) { response in
             completionHandler(response == .alertFirstButtonReturn)
         }
     }
@@ -48,9 +54,11 @@ extension WebPageController: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping (String?) -> Void
     ) {
-        let alert = confirmationAlert(prompt)
+        let alert = JavaScriptPanels.confirmation(prompt)
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
         field.stringValue = defaultText ?? ""
+        // Keep the prompt field free of the system auto-completion "补全提示".
+        field.isAutomaticTextCompletionEnabled = false
         alert.accessoryView = field
         present(alert) { response in
             completionHandler(response == .alertFirstButtonReturn ? field.stringValue : nil)
@@ -67,15 +75,6 @@ extension WebPageController: WKUIDelegate {
     ) {
         let trusted = origin.host == accessURL?.host || origin.host == "localhost" || origin.host == "127.0.0.1"
         decisionHandler(trusted ? .grant : .deny)
-    }
-
-    /// Alert shaped like the ones JS `confirm` and `prompt` expect: OK first, Cancel second.
-    private func confirmationAlert(_ message: String) -> NSAlert {
-        let alert = NSAlert()
-        alert.messageText = message
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Cancel")
-        return alert
     }
 }
 

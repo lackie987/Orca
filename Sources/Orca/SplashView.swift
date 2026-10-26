@@ -6,17 +6,11 @@ import AppKit
 /// restart, the empty window during the first launch — stays faintly visible. Above that glass it
 /// paints the base colour the web theme published over the bridge, which is what gives the startup
 /// screen the same plane as the page; the fill, not the glass, owns the colour so the material's
-/// own tint cannot shift it. The icon is rounded with the window's own corner radius so both
-/// silhouettes match.
+/// own tint cannot shift it. The icon is the transparent character mark, so it has no card and no
+/// colour of its own to disagree with that plane.
 final class SplashView: NSView {
     var onRetry: (() -> Void)?
     var onOpenLog: (() -> Void)?
-    var onOpenSettings: (() -> Void)?
-
-    /// Corner radius the icon shares with the window chrome.
-    var iconCornerRadius: CGFloat = WindowMetrics.fallbackCornerRadius {
-        didSet { applyIconShape() }
-    }
 
     /// Base colour of the plane the page paints, reported by the theme bridge; nil before any report.
     var baseColor: NSColor? {
@@ -31,6 +25,9 @@ final class SplashView: NSView {
     var showsPageBehind = false {
         didSet { applyBaseColor() }
     }
+
+    /// Side of the icon slot above the title.
+    private static let iconSide: CGFloat = 84
 
     /// Default length of the dissolve from the startup surface to the page.
     private static let defaultFadeDuration: TimeInterval = 0.45
@@ -50,7 +47,6 @@ final class SplashView: NSView {
     private let buttonRow = NSStackView()
     private let retryButton = NSButton(title: "Try Again", target: nil, action: nil)
     private let logButton = NSButton(title: "Service Log", target: nil, action: nil)
-    private let settingsButton = NSButton(title: "Settings…", target: nil, action: nil)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -71,6 +67,24 @@ final class SplashView: NSView {
         spinner.startAnimation(nil)
         statusLabel.stringValue = message
         detailLabel.stringValue = ""
+    }
+
+    /// Draws the startup icon: the transparent character mark, in the app icon's own silhouette.
+    ///
+    /// The mark carries no background at all — a card behind it would put a colour of its own onto
+    /// the plane the theme published, and the two would disagree the moment the theme changed. It is
+    /// still clipped to the shape the app icon is composed with, because the artwork's frame cuts
+    /// the subject off at the edges and the shared continuous-curvature squircle is what keeps the
+    /// surface and the Dock tile reading as one silhouette. The bundled app icon is only a fallback
+    /// for a bundle that lost the mark.
+    private func applyIcon() {
+        guard let mark = AppIcon.startupMark() else {
+            iconView.image = AppIcon.startupImage()
+            return
+        }
+        // Composed at the display scale, so the silhouette stays crisp at the slot's size.
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        iconView.image = IconProcessor.rounded(mark, size: Self.iconSide * scale) ?? mark
     }
 
     func showFailure(_ message: String) {
@@ -155,15 +169,13 @@ final class SplashView: NSView {
         stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        iconView.image = NSImage(named: "AppIcon") ?? NSApp.applicationIconImage
         iconView.imageScaling = .scaleProportionallyUpOrDown
-        iconView.wantsLayer = true
         iconView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            iconView.widthAnchor.constraint(equalToConstant: 84),
-            iconView.heightAnchor.constraint(equalToConstant: 84),
+            iconView.widthAnchor.constraint(equalToConstant: Self.iconSide),
+            iconView.heightAnchor.constraint(equalToConstant: Self.iconSide),
         ])
-        applyIconShape()
+        applyIcon()
 
         titleLabel.font = .systemFont(ofSize: 25, weight: .semibold)
         subtitleLabel.font = .systemFont(ofSize: 13)
@@ -194,14 +206,11 @@ final class SplashView: NSView {
         retryButton.keyEquivalent = "\r"
         logButton.target = self
         logButton.action = #selector(logPressed)
-        settingsButton.target = self
-        settingsButton.action = #selector(settingsPressed)
 
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
         buttonRow.addArrangedSubview(retryButton)
         buttonRow.addArrangedSubview(logButton)
-        buttonRow.addArrangedSubview(settingsButton)
 
         for view in [iconView, titleLabel, subtitleLabel, spinner, statusLabel, detailLabel, buttonRow] as [NSView] {
             stack.addArrangedSubview(view)
@@ -261,14 +270,6 @@ final class SplashView: NSView {
         isDarkBase ? NSColor.white.withAlphaComponent(0.5) : .tertiaryLabelColor
     }
 
-    /// Rounds the icon with the window corner radius, using the continuous curve the system uses.
-    private func applyIconShape() {
-        guard let layer = iconView.layer else { return }
-        layer.cornerCurve = .continuous
-        layer.cornerRadius = iconCornerRadius
-        layer.masksToBounds = true
-    }
-
     private func setButtonsHidden(_ hidden: Bool) {
         for button in actionButtons {
             button.isHidden = hidden
@@ -277,7 +278,7 @@ final class SplashView: NSView {
 
     /// Buttons offered on the stopped and failure screens, in display order.
     private var actionButtons: [NSButton] {
-        [retryButton, logButton, settingsButton]
+        [retryButton, logButton]
     }
 
     @objc private func retryPressed() {
@@ -286,9 +287,5 @@ final class SplashView: NSView {
 
     @objc private func logPressed() {
         onOpenLog?()
-    }
-
-    @objc private func settingsPressed() {
-        onOpenSettings?()
     }
 }

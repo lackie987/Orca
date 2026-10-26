@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import WebKit
 
 /// Message channels the page talks through: one-way notifications (theme, drag band, console,
@@ -10,7 +11,7 @@ extension WebPageController {
         for name in ["themeSource", "titleBar", "diagnostics", "orcaPagePainted"] {
             userContentController.add(WeakScriptMessageHandler(target: self), name: name)
         }
-        for name in ["directoryPicker", "orcaTitleBar", "orcaPalette"] {
+        for name in ["directoryPicker", "orcaTitleBar", "orcaPalette", "orcaAppIcon", "orcaDesktop"] {
             userContentController.addScriptMessageHandler(
                 WeakReplyScriptMessageHandler(target: self),
                 contentWorld: .page,
@@ -58,68 +59,12 @@ extension WebPageController: WKScriptMessageHandlerWithReply {
             handlePaletteMessage(message, replyHandler: replyHandler)
         case "directoryPicker":
             handleDirectoryPicker(replyHandler: replyHandler)
+        case "orcaAppIcon":
+            handleAppIconMessage(message, replyHandler: replyHandler)
+        case "orcaDesktop":
+            handleDesktopMessage(message, replyHandler: replyHandler)
         default:
             replyHandler(nil, "Unsupported Orca bridge: \(message.name)")
-        }
-    }
-
-    /// Handles `get`/`set` requests from the `dsh-orca-titlebar` plugin bridge.
-    private func handleTitleBarMessage(_ message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
-        handleSettingBridge(
-            message,
-            name: "orcaTitleBar",
-            field: "mode",
-            current: { [weak self] in self?.preferences.titleBarMode ?? "" },
-            normalize: { TitleBarMode(rawValue: $0) == nil ? nil : $0 },
-            store: { [weak self] mode in
-                guard let self else { return }
-                preferences.titleBarMode = mode
-                onTitleBarModeChange?(mode)
-            },
-            replyHandler: replyHandler
-        )
-    }
-
-    /// Handles `get`/`set` requests from the `__ORCA_PALETTE__` theme bridge.
-    ///
-    /// Only `#rrggbb` values are accepted; anything else is answered with the colour already stored.
-    private func handlePaletteMessage(_ message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
-        handleSettingBridge(
-            message,
-            name: "orcaPalette",
-            field: "base",
-            current: { [weak self] in self?.preferences.splashBaseColor ?? "" },
-            normalize: { raw in ColorHex.color(raw).flatMap(ColorHex.string) },
-            store: { [weak self] hex in
-                guard let self else { return }
-                preferences.splashBaseColor = hex
-                onPaletteBase?(hex)
-            },
-            replyHandler: replyHandler
-        )
-    }
-
-    /// Asks the user for a workspace folder and answers the page with its path, or nil on cancel.
-    private func handleDirectoryPicker(replyHandler: @escaping (Any?, String?) -> Void) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else {
-                replyHandler(nil, "Orca is shutting down")
-                return
-            }
-            let panel = NSOpenPanel()
-            panel.canChooseDirectories = true
-            panel.canChooseFiles = false
-            panel.allowsMultipleSelection = false
-            panel.canCreateDirectories = true
-            panel.prompt = "Choose"
-            panel.message = "Choose a workspace folder"
-            self.present(panel) { response in
-                guard response == .OK, let url = panel.url else {
-                    replyHandler(nil, nil)
-                    return
-                }
-                replyHandler(url.path, nil)
-            }
         }
     }
 
@@ -128,7 +73,7 @@ extension WebPageController: WKScriptMessageHandlerWithReply {
     /// `get` answers with the value currently stored, `set` validates the posted field and answers
     /// with the value it accepted; a rejected payload is answered with the stored value so the page
     /// can tell the two apart instead of assuming its write landed.
-    private func handleSettingBridge(
+    func handleSettingBridge(
         _ message: WKScriptMessage,
         name: String,
         field: String,

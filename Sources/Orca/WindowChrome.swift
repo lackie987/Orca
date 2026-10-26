@@ -3,13 +3,23 @@ import AppKit
 /// Window chrome driven by the `dsh-orca-titlebar` plugin: title visibility, the traffic lights and
 /// the hover band that reveals them.
 ///
-/// `hover` (the default) keeps the native chrome transparent with no visible title and reveals the
-/// real traffic lights through a transparent top band when the pointer enters it — the Helium-style
-/// hover title bar, drawn natively rather than as a web overlay.
+/// `lightsOnly` (the default) keeps the native chrome transparent with no visible title and shows
+/// the real traffic lights over the page's desktop title strip. `hover` hides them until the pointer
+/// enters a transparent top band — the Helium-style hover title bar, drawn natively rather than as
+/// a web overlay.
 final class WindowChrome {
+    /// AppKit centers the button cluster in the 28pt titlebar (~17pt below the window top), while
+    /// the desktop page centers its header row in the 52px sidebar title strip (~26pt). The lights
+    /// sit 9pt above the toggle / new-session icons without this drop.
+    private static let lightsDrop: CGFloat = 9
+
     private let window: NSWindow
     private var hoverBand: HoverBandView?
     private var hideLightsWorkItem: DispatchWorkItem?
+    /// Frames AppKit gave the buttons before any drop, so the offset never accumulates.
+    private var lightsBaseline: [NSRect] = []
+    /// The drop only makes sense while the page draws the title strip; a real titlebar owns the row.
+    private var usesWebTitleStrip = true
 
     init(window: NSWindow) {
         self.window = window
@@ -19,29 +29,68 @@ final class WindowChrome {
     func apply(_ raw: String) {
         switch TitleBarMode.parse(raw) {
         case .hidden:
-            setChrome(transparent: true, lightsHidden: true, topInset: 0)
+            usesWebTitleStrip = true
+            setChrome(transparent: true, lightsHidden: true)
             disableHover()
         case .hover:
-            setChrome(transparent: true, lightsHidden: true, topInset: 0)
+            usesWebTitleStrip = true
+            setChrome(transparent: true, lightsHidden: true)
             enableHover()
         case .lightsOnly:
-            setChrome(transparent: true, lightsHidden: false, topInset: 44)
+            usesWebTitleStrip = true
+            setChrome(transparent: true, lightsHidden: false)
             disableHover()
         case .shown:
-            setChrome(transparent: false, lightsHidden: false, topInset: 0)
+            usesWebTitleStrip = false
+            setChrome(transparent: false, lightsHidden: false)
             disableHover()
+        }
+        alignTrafficLights()
+    }
+
+    /// Moves the traffic lights onto the page's header row. Safe to call after any AppKit layout
+    /// pass: the buttons are placed from the captured baseline, never from their current frame.
+    func alignTrafficLights() {
+        guard usesWebTitleStrip else {
+            restoreLightsBaseline()
+            return
+        }
+        let buttons = trafficLights
+        guard let parent = buttons.first?.superview,
+              !buttons.isEmpty,
+              buttons.allSatisfy({ $0.frame.height > 0 })
+        else { return }
+        if lightsBaseline.count != buttons.count {
+            lightsBaseline = buttons.map(\.frame)
+        }
+        let dy = parent.isFlipped ? Self.lightsDrop : -Self.lightsDrop
+        for (button, baseline) in zip(buttons, lightsBaseline) {
+            var target = baseline
+            target.origin.y += dy
+            if button.frame != target {
+                button.frame = target
+            }
         }
     }
 
-    /// Sets window chrome and the top safe-area inset used by the `lightsOnly` preset.
-    private func setChrome(transparent: Bool, lightsHidden: Bool, topInset: CGFloat) {
+    /// Returns the buttons to where AppKit put them, for the standard-titlebar preset.
+    private func restoreLightsBaseline() {
+        guard !lightsBaseline.isEmpty else { return }
+        for (button, baseline) in zip(trafficLights, lightsBaseline) where button.frame != baseline {
+            button.frame = baseline
+        }
+    }
+
+    /// Sets window chrome. The desktop page reserves its own sidebar title strip, so the web view
+    /// stays full-height instead of being inset a second time.
+    private func setChrome(transparent: Bool, lightsHidden: Bool) {
         window.titleVisibility = transparent ? .hidden : .visible
         window.titlebarAppearsTransparent = transparent
         window.titlebarSeparatorStyle = transparent ? .none : .automatic
         for button in trafficLights {
             button.isHidden = lightsHidden
         }
-        window.contentView?.additionalSafeAreaInsets = NSEdgeInsets(top: topInset, left: 0, bottom: 0, right: 0)
+        window.contentView?.additionalSafeAreaInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
     }
 
     /// The three standard buttons, in close / minimise / zoom order.
@@ -61,7 +110,9 @@ final class WindowChrome {
                 band.topAnchor.constraint(equalTo: contentView.topAnchor),
                 band.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
                 band.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-                band.heightAnchor.constraint(equalToConstant: 28),
+                // The buttons sit `lightsDrop` lower than AppKit's default, so the band has to
+                // reach past them or the pointer loses the lights while still on a button.
+                band.heightAnchor.constraint(equalToConstant: 28 + Self.lightsDrop),
             ])
             hoverBand = band
         }

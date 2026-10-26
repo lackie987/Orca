@@ -5,7 +5,7 @@ import WebKit
 /// can change at runtime, zoom and the full-screen mirror.
 ///
 /// The delegate and bridge work sits beside it by concern — `WebPageNavigation`, `WebPageBridges`,
-/// `WebPageDialogs` — and the page-side half of the bridges in `WebPageScripts`.
+/// `WebPageDialogs` — and the page side of the bridges in `WebPageScripts`.
 final class WebPageController: NSObject {
     let webView: WKWebView
 
@@ -27,11 +27,23 @@ final class WebPageController: NSObject {
     /// Fired when the main frame gives up loading, so the startup surface never waits forever.
     var onPageLoadFailed: (() -> Void)?
 
+    /// Asked by the desktop shortcut bridge when a bound command closes the window.
+    var onCloseWindow: (() -> Void)?
+
     /// Settings the page-side bridges read and write; shared with the bridge extensions.
     let preferences: Preferences
 
     /// Tokenized URL currently loaded; `nil` until the shell hands one over.
     private(set) var accessURL: URL?
+
+    /// Snapshot of the origin being left, replayed when the next one is served on another port.
+    private var pendingStorage: WebPageStorage.Snapshot?
+
+    /// Windows the page opened and has not closed yet.
+    ///
+    /// WebKit hands the web view over and keeps nothing else, so without this the window would go
+    /// away the moment `window.open` returns.
+    private var popups: [WebPagePopup] = []
 
     init(preferences: Preferences) {
         self.preferences = preferences
@@ -50,12 +62,30 @@ final class WebPageController: NSObject {
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsMagnification = false
         webView.setValue(false, forKey: "drawsBackground")
-        webView.underPageBackgroundColor = .clear
+        webView.underPageBackgroundColor = ThemeColor.boot(preferences)
 
-        WebPageScripts.install(on: userContentController)
+        WebPageScripts.install(
+            on: userContentController,
+            bootBackground: ThemeColor.bootHex(preferences)
+        )
         installBridges(on: userContentController)
 
         applyPreferences()
+    }
+
+    /// Opens a window for the page's `window.open` and hands WebKit the web view to drive.
+    ///
+    /// The popup stays alive here until its window closes, which is also what makes `popup.closed`
+    /// answer truthfully on the page side.
+    func openPopup(with configuration: WKWebViewConfiguration) -> WKWebView {
+        let popup = WebPagePopup(configuration: configuration)
+        popup.onClose = { [weak self, weak popup] in
+            guard let self, let popup else { return }
+            popups.removeAll { $0 === popup }
+        }
+        popups.append(popup)
+        popup.show()
+        return popup.webView
     }
 
     /// Applies settings that can change while the window is open.
@@ -66,19 +96,56 @@ final class WebPageController: NSObject {
         }
     }
 
+    /// Snapshots the page's `localStorage` so a restart on another port can carry it over.
+    ///
+    /// Called while the old page is still on screen — the one moment its store is reachable, since
+    /// the new origin cannot read it once the URL has changed.
+    func captureLocalStorage() {
+        WebPageStorage.capture(from: webView) { [weak self] snapshot in
+            DispatchQueue.main.async { self?.pendingStorage = snapshot }
+        }
+    }
+
     /// Loads the tokenized access URL printed by the service.
     func load(_ url: URL) {
+        refreshUserScripts()
+        stageStorage(for: url)
         accessURL = url
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         webView.load(request)
     }
 
+    /// Re-installs the injected scripts so the boot background matches the current theme.
+    ///
+    /// The startup background is baked into a `WKUserScript`; without this a page reload (or a
+    /// service restart) would paint the colour from the last app launch, not the theme picked since.
+    private func refreshUserScripts() {
+        let controller = webView.configuration.userContentController
+        controller.removeAllUserScripts()
+        WebPageScripts.install(
+            on: controller,
+            bootBackground: ThemeColor.bootHex(preferences)
+        )
+    }
+
+    /// Replays the pending snapshot when the URL is about to change origin.
+    /// - Parameter url: URL the shell is about to load.
+    private func stageStorage(for url: URL) {
+        guard let snapshot = pendingStorage, let port = url.port, port != snapshot.port else { return }
+        webView.configuration.userContentController.addUserScript(
+            WebPageStorage.restoreScript(port: port, snapshot: snapshot)
+        )
+        pendingStorage = nil
+    }
+
     func reload() {
+        refreshUserScripts()
         webView.reload()
     }
 
     func reloadFromOrigin() {
+        refreshUserScripts()
         webView.reloadFromOrigin()
     }
 

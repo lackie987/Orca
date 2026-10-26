@@ -1,6 +1,11 @@
 import AppKit
 
-/// Settings panel for the local service and the embedded web view.
+/// The shell's own settings panel: the local service's port, profile and command plus the window's
+/// two switches.
+///
+/// DSH's own settings page owns ⌘, — the page is the settings surface for everything it can see —
+/// so this panel sits one modifier further out, on ⌥⌘,. It is the only place the service parameters
+/// can be changed, which is what it is for: those are properties of the shell, not of the page.
 final class SettingsWindowController: NSWindowController {
     /// Reports whether the edited values require restarting the local service.
     var onSave: ((Bool) -> Void)?

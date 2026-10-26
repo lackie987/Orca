@@ -27,4 +27,21 @@ enum AppPaths {
     static var serviceSession: URL {
         applicationSupport.appendingPathComponent("session.json")
     }
+
+    /// Keybinding overrides written by DSH's desktop shortcut editor.
+    static var keybindings: URL {
+        applicationSupport.appendingPathComponent("keybindings.json")
+    }
+
+    /// Processed (square, scaled) copy of the custom app icon; absent when the bundled icon is in
+    /// use. Kept here rather than in the `.app` so the startup surface can reload it at launch.
+    static var customAppIcon: URL {
+        applicationSupport.appendingPathComponent("app-icon.png")
+    }
+
+    /// Real `.icns` generated from the SVG template plus its background colour, so the template
+    /// yields a normal macOS icon file rather than only an in-memory image.
+    static var templateIcon: URL {
+        applicationSupport.appendingPathComponent("template-icon.icns")
+    }
 }

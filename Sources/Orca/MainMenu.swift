@@ -22,7 +22,15 @@ enum MainMenu {
         let menu = NSMenu(title: "Orca")
         menu.add(title: "About Orca", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), target: NSApp)
         menu.addItem(.separator())
-        menu.add(title: "Settings…", action: #selector(AppDelegate.showSettings(_:)), key: ",", target: delegate)
+        // ⌘, is the page's own settings surface; the shell's panel (service port, profile, command)
+        // sits one modifier further out so both are reachable without a conflict.
+        menu.add(
+            title: "Orca Settings…",
+            action: #selector(AppDelegate.showSettings(_:)),
+            key: ",",
+            target: delegate,
+            modifiers: [.command, .option]
+        )
         menu.addItem(.separator())
 
         let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
