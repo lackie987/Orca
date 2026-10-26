@@ -24,12 +24,30 @@ echo "▸ Assembling bundle"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
-cp "$DIR/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+# The running app writes the chosen icon preset into the installed bundle's AppIcon.icns, so a
+# rebuild would otherwise reset the visible icon to the repo default until the app launches again.
+# Carry the installed icon over whenever it differs from the shipped one.
+INSTALLED_ICON="$INSTALL_DIR/$APP_NAME.app/Contents/Resources/AppIcon.icns"
+ICON_SOURCE="$DIR/Resources/AppIcon.icns"
+if [ -f "$INSTALLED_ICON" ] && ! cmp -s "$INSTALLED_ICON" "$DIR/Resources/AppIcon.icns"; then
+  ICON_SOURCE="$INSTALLED_ICON"
+fi
+cp "$ICON_SOURCE" "$APP/Contents/Resources/AppIcon.icns"
 cp "$DIR/Resources/Info.plist" "$APP/Contents/Info.plist"
+mkdir -p "$APP/Contents/Resources/Icons"
+cp "$DIR/Resources/Icons/"* "$APP/Contents/Resources/Icons/"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
 
 echo "▸ Signing ($SIGN_IDENTITY)"
-codesign --force --sign "$SIGN_IDENTITY" --identifier com.xu.orca "$APP" >/dev/null 2>&1
+if [ "$SIGN_IDENTITY" = "-" ]; then
+  # A stable designated requirement keeps TCC grants (Documents access, etc.) across rebuilds:
+  # an ad-hoc signature's default requirement is its cdhash, so every build looks like a brand
+  # new app to macOS and re-asks for permission.
+  codesign --force --sign - --identifier com.xu.orca \
+    -r='designated => identifier "com.xu.orca"' "$APP" >/dev/null 2>&1
+else
+  codesign --force --sign "$SIGN_IDENTITY" --identifier com.xu.orca "$APP" >/dev/null 2>&1
+fi
 
 if [ "${1:-}" = "--no-install" ]; then
   echo "✅ $APP"
