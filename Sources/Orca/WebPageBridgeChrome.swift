@@ -38,6 +38,12 @@ extension WebPageController {
                 guard let self else { return }
                 preferences.splashBaseColor = hex
                 onPaletteBase?(hex)
+                // The theme is painting now; drop the boot-only override so the page's own
+                // token layer owns the background again.
+                webView.evaluateJavaScript(
+                    "var node = document.getElementById('orca-boot-bg'); if (node) { node.remove(); }",
+                    completionHandler: nil
+                )
             },
             replyHandler: replyHandler
         )

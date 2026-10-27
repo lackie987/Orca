@@ -19,6 +19,28 @@ enum ColorHex {
         )
     }
 
+    /// Parses the `#rrggbb` and `rgb(r, g, b)` forms a computed colour reports.
+    static func fromCSS(_ value: String?) -> String? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        if let color = color(raw) { return string(color) }
+        let numbers = raw
+            .replacingOccurrences(of: "rgba(", with: "")
+            .replacingOccurrences(of: "rgb(", with: "")
+            .replacingOccurrences(of: ")", with: "")
+            .split(whereSeparator: { $0 == "," || $0 == " " || $0 == "/" })
+            .compactMap { Double($0) }
+        guard numbers.count >= 3 else { return nil }
+        let color = NSColor(
+            srgbRed: CGFloat(numbers[0]) / 255,
+            green: CGFloat(numbers[1]) / 255,
+            blue: CGFloat(numbers[2]) / 255,
+            alpha: 1
+        )
+        return string(color)
+    }
+
     /// Renders a colour back to lowercase `#rrggbb`; nil when it has no sRGB representation.
     static func string(_ color: NSColor) -> String? {
         guard let rgb = color.usingColorSpace(.sRGB) else { return nil }

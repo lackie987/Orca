@@ -66,7 +66,8 @@ final class WebPageController: NSObject {
 
         WebPageScripts.install(
             on: userContentController,
-            bootBackground: ThemeColor.bootHex(preferences)
+            bootBackground: ThemeColor.bootHex(preferences),
+            bootFont: ProfileFont.family(profile: preferences.profile)
         )
         installBridges(on: userContentController)
 
@@ -125,7 +126,8 @@ final class WebPageController: NSObject {
         controller.removeAllUserScripts()
         WebPageScripts.install(
             on: controller,
-            bootBackground: ThemeColor.bootHex(preferences)
+            bootBackground: ThemeColor.bootHex(preferences),
+            bootFont: ProfileFont.family(profile: preferences.profile)
         )
     }
 
@@ -140,13 +142,58 @@ final class WebPageController: NSObject {
     }
 
     func reload() {
-        refreshUserScripts()
-        webView.reload()
+        withCurrentBase {
+            self.refreshUserScripts()
+            self.webView.reload()
+        }
     }
 
     func reloadFromOrigin() {
-        refreshUserScripts()
-        webView.reloadFromOrigin()
+        withCurrentBase {
+            self.refreshUserScripts()
+            self.webView.reloadFromOrigin()
+        }
+    }
+
+    /// Reads the base the page is painting right now, so a reload's boot frame follows the live
+    /// theme instead of a colour stored on an earlier plane.
+    private func withCurrentBase(_ body: @escaping () -> Void) {
+        let lock = NSLock()
+        var finished = false
+        func finish() {
+            lock.lock()
+            let first = !finished
+            finished = true
+            lock.unlock()
+            if first { body() }
+        }
+        let script = """
+        (function () {
+          try {
+            var host = document.body || document.documentElement;
+            if (!host) return '';
+            var value = getComputedStyle(host).getPropertyValue('--dsw-alias-bg-base').trim();
+            if (!value) value = getComputedStyle(document.documentElement).getPropertyValue('--dsw-alias-bg-base').trim();
+            if (!value) return '';
+            var probe = document.createElement('span');
+            probe.style.color = value;
+            host.appendChild(probe);
+            var resolved = getComputedStyle(probe).color;
+            probe.remove();
+            return resolved || value;
+          } catch (error) {
+            return '';
+          }
+        })()
+        """
+        webView.evaluateJavaScript(script) { [weak self] result, _ in
+            if let self, let raw = result as? String, let hex = ColorHex.fromCSS(raw) {
+                self.preferences.splashBaseColor = hex
+            }
+            finish()
+        }
+        // A hung web process must not turn the Reload command into a no-op.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { finish() }
     }
 
     func zoomIn() {
