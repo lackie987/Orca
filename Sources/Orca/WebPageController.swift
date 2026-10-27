@@ -30,6 +30,12 @@ final class WebPageController: NSObject {
     /// Asked by the desktop shortcut bridge when a bound command closes the window.
     var onCloseWindow: (() -> Void)?
 
+    /// One event pushed by the developer-tools agent in the page: its channel and its payload.
+    var onDevToolsEvent: ((String, Any) -> Void)?
+
+    /// Fired when the main frame starts loading, so the developer tools can drop their page state.
+    var onNavigationStarted: (() -> Void)?
+
     /// Settings the page-side bridges read and write; shared with the bridge extensions.
     let preferences: Preferences
 

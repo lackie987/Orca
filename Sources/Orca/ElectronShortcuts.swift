@@ -41,7 +41,9 @@ enum ElectronDefaults {
         entry("reload", "Reload", kVK_ANSI_R, [.command], .covered),
         // Orca reloads from the server with ⌥⌘R; ⇧⌘R already restarts the local service.
         entry("forceReload", "Force Reload", kVK_ANSI_R, [.command, .shift], .conflict),
-        entry("toggleDevTools", "Toggle Developer Tools", kVK_ANSI_I, [.command, .option], .covered),
+        // Orca's own developer tools, on the Electron default's F12 rather than its ⌥⌘I; that
+        // combination still works and keeps the entry honest about what the key does.
+        entry("toggleDevTools", "Developer Tools", kVK_F12, [], .covered),
         entry("actualSize", "Actual Size", kVK_ANSI_0, [.command], .covered),
         entry("zoomIn", "Zoom In", kVK_ANSI_Equal, [.command, .shift], .covered),
         entry("zoomOut", "Zoom Out", kVK_ANSI_Minus, [.command], .covered),

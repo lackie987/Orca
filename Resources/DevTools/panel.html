@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Orca Developer Tools</title>
+<link rel="stylesheet" href="panel.css">
+</head>
+<body>
+
+<header class="bar">
+  <nav class="tabs" role="tablist">
+    <button class="tab" role="tab" data-tab="console" aria-selected="true">Console<span class="count" data-count="console">0</span></button>
+    <button class="tab" role="tab" data-tab="network" aria-selected="false">Network<span class="count" data-count="network">0</span></button>
+    <button class="tab" role="tab" data-tab="elements" aria-selected="false">Elements</button>
+    <button class="tab" role="tab" data-tab="storage" aria-selected="false">Storage</button>
+  </nav>
+  <div class="tools">
+    <input class="filter" type="search" placeholder="Filter" spellcheck="false" autocomplete="off" data-role="filter">
+    <button class="ghost" data-action="clear">Clear</button>
+    <button class="ghost" data-action="close" title="Close (F12)">✕</button>
+  </div>
+</header>
+
+<main>
+  <section class="page" data-page="console" data-active="true">
+    <div class="console">
+      <div class="console-log" data-role="console-log"></div>
+      <form class="console-input" data-role="console-form">
+        <span class="prompt">›</span>
+        <input type="text" spellcheck="false" autocomplete="off" placeholder="Evaluate in the page — promises resolve, objects expand" data-role="console-input">
+      </form>
+    </div>
+  </section>
+
+  <section class="page" data-page="network">
+    <div class="network">
+      <div class="network-head">
+        <span>Name</span><span>Method</span><span>Status</span><span>Kind</span><span>Size</span><span>Time</span>
+      </div>
+      <div class="network-body">
+        <div class="network-list" data-role="network-list">
+          <div class="network-rows" data-role="network-rows"></div>
+        </div>
+        <div class="detail" data-role="network-detail">
+          <p class="hint">Select a request to see its headers and body.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="page" data-page="elements">
+    <div class="elements">
+      <div class="tree" data-role="dom-tree"></div>
+      <div class="detail" data-role="dom-detail">
+        <p class="hint">Select an element to see its styles. Hovering highlights it on the page.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="page" data-page="storage">
+    <div class="storage">
+      <aside class="areas">
+        <button data-area="local" data-selected="true">Local Storage</button>
+        <button data-area="session" data-selected="false">Session Storage</button>
+      </aside>
+      <div class="store">
+        <div class="store-head">
+          <span data-role="store-origin"></span>
+          <button class="ghost" data-action="storage-add">+ Add</button>
+          <button class="ghost" data-action="storage-reload">Reload</button>
+          <button class="ghost" data-action="storage-clear">Clear all</button>
+        </div>
+        <div class="store-rows" data-role="store-rows"></div>
+        <div class="store-editor" data-role="store-editor" hidden>
+          <div class="fields">
+            <input type="text" spellcheck="false" autocomplete="off" placeholder="Key" data-role="store-key">
+          </div>
+          <textarea spellcheck="false" placeholder="Value" data-role="store-value"></textarea>
+          <div class="buttons">
+            <button class="ghost" data-action="store-delete">Delete</button>
+            <button class="ghost" data-action="store-cancel">Cancel</button>
+            <button class="primary" data-action="store-save">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="statusbar">
+  <span><span class="dot" data-role="status-dot"></span><span data-role="status">Connecting…</span></span>
+  <span class="spacer"></span>
+  <span data-role="meta"></span>
+</div>
+
+<script src="panel.js"></script>
+</body>
+</html>

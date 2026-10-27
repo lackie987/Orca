@@ -11,6 +11,7 @@ final class Preferences {
         static let keepServiceRunning = "keepServiceRunningAfterQuit"
         static let developerExtras = "developerExtras"
         static let pageZoom = "pageZoom"
+        static let devToolsHeight = "devToolsHeight"
         static let titleBarMode = "titleBarMode"
         static let splashBaseColor = "splashBaseColor"
         static let appIconPreset = "appIconPreset"
@@ -31,6 +32,7 @@ final class Preferences {
             Key.keepServiceRunning: false,
             Key.developerExtras: false,
             Key.pageZoom: 1.0,
+            Key.devToolsHeight: 320.0,
             Key.titleBarMode: TitleBarMode.lightsOnly.rawValue,
             Key.splashBaseColor: "",
             Key.appIconPreset: "orca",
@@ -76,6 +78,12 @@ final class Preferences {
     var pageZoom: Double {
         get { defaults.double(forKey: Key.pageZoom) }
         set { defaults.set(newValue, forKey: Key.pageZoom) }
+    }
+
+    /// Height of the developer-tools panel, as the divider was last left.
+    var devToolsHeight: Double {
+        get { defaults.double(forKey: Key.devToolsHeight) }
+        set { defaults.set(newValue, forKey: Key.devToolsHeight) }
     }
 
     /// Window chrome preset written by the `dsh-orca-titlebar` plugin; `lightsOnly` (traffic lights

@@ -19,22 +19,38 @@ enum WebPageScripts {
 
     /// Everything the shell injects, in the order the web view should run it.
     private static func userScripts(bootBackground: String, bootFont: String?) -> [WKUserScript] {
-        [
+        var scripts = [
             // First, so the page boots as a desktop shell and the shortcut service sees it.
-            WKUserScript(source: desktop, injectionTime: .atDocumentStart, forMainFrameOnly: true),
+            atStart(desktop),
             // Then the very first frame already carries the theme instead of the app's default.
-            WKUserScript(source: bootBackgroundScript(bootBackground, bootFont: bootFont), injectionTime: .atDocumentStart, forMainFrameOnly: true),
-            WKUserScript(source: appVersionScript, injectionTime: .atDocumentStart, forMainFrameOnly: true),
-            WKUserScript(source: console, injectionTime: .atDocumentStart, forMainFrameOnly: true),
-            WKUserScript(source: directoryPicker, injectionTime: .atDocumentStart, forMainFrameOnly: true),
-            WKUserScript(source: titleBar, injectionTime: .atDocumentStart, forMainFrameOnly: true),
-            WKUserScript(source: palette, injectionTime: .atDocumentStart, forMainFrameOnly: true),
-            WKUserScript(source: appIcon, injectionTime: .atDocumentStart, forMainFrameOnly: true),
-            WKUserScript(source: dragZone, injectionTime: .atDocumentEnd, forMainFrameOnly: true),
-            WKUserScript(source: theme, injectionTime: .atDocumentEnd, forMainFrameOnly: true),
-            WKUserScript(source: pagePainted, injectionTime: .atDocumentEnd, forMainFrameOnly: true),
-            WKUserScript(source: inputCompletion, injectionTime: .atDocumentEnd, forMainFrameOnly: true),
+            atStart(bootBackgroundScript(bootBackground, bootFont: bootFont)),
+            atStart(appVersionScript),
+            atStart(console),
         ]
+        // The agent has to be in place before the app boots: console calls, requests and the DOM the
+        // panel queries later are all only observable from a script that ran first.
+        if !DevToolsAssets.agentSource.isEmpty {
+            scripts.append(atStart(DevToolsAssets.agentSource))
+        }
+        scripts += [
+            atStart(directoryPicker),
+            atStart(titleBar),
+            atStart(palette),
+            atStart(appIcon),
+            atEnd(dragZone),
+            atEnd(theme),
+            atEnd(pagePainted),
+            atEnd(inputCompletion),
+        ]
+        return scripts
+    }
+
+    private static func atStart(_ source: String) -> WKUserScript {
+        WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
+
+    private static func atEnd(_ source: String) -> WKUserScript {
+        WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
     }
 
     /// The Orca bundle version, published for the settings UI that shows the shell version.

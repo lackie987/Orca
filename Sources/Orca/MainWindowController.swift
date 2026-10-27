@@ -5,6 +5,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let service: ServiceController
     private let preferences: Preferences
     private let page: WebPageController
+    private let devTools: DevToolsController
     private let chrome: WindowChrome
     private let splash = SplashView()
     private var loadedURL: URL?
@@ -21,7 +22,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     init(service: ServiceController, preferences: Preferences) {
         self.service = service
         self.preferences = preferences
-        self.page = WebPageController(preferences: preferences)
+        let page = WebPageController(preferences: preferences)
+        self.page = page
+        self.devTools = DevToolsController(page: page, preferences: preferences)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 840),
@@ -92,22 +95,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         page.resetZoom()
     }
 
-    @objc func toggleInspector(_ sender: Any?) {
-        if !preferences.developerExtras {
-            preferences.developerExtras = true
-            page.applyPreferences()
-        }
-        let inspectorSelector = NSSelectorFromString("_inspector")
-        guard page.webView.responds(to: inspectorSelector),
-              let inspector = page.webView.value(forKey: "_inspector") as? NSObject
-        else {
-            NSSound.beep()
-            return
-        }
-        let show = NSSelectorFromString("show")
-        if inspector.responds(to: show) {
-            inspector.perform(show)
-        }
+    @objc func toggleDevTools(_ sender: Any?) {
+        devTools.toggle()
     }
 
     @objc func openInBrowser(_ sender: Any?) {
@@ -192,7 +181,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.contentView = container
         contentBackdrop = container
 
-        Layout.fill(page.webView, splash, in: container)
+        // The page and the startup surface share the area above the panel, so opening the developer
+        // tools shortens the page rather than covering its bottom edge.
+        let pageArea = NSView()
+        pageArea.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(pageArea)
+        container.addSubview(devTools.panel)
+        Layout.fill(page.webView, splash, in: pageArea)
+
+        NSLayoutConstraint.activate([
+            pageArea.topAnchor.constraint(equalTo: container.topAnchor),
+            pageArea.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            pageArea.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            pageArea.bottomAnchor.constraint(equalTo: devTools.panel.topAnchor),
+
+            devTools.panel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            devTools.panel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            devTools.panel.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
     }
 
     private func connect() {
@@ -220,6 +226,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         page.onCloseWindow = { [weak self] in
             self?.window?.performClose(nil)
         }
+        page.onDevToolsEvent = { [weak self] channel, payload in
+            self?.devTools.receive(channel: channel, payload: payload)
+        }
+        page.onNavigationStarted = { [weak self] in
+            self?.devTools.pageWillReload()
+        }
     }
 
     /// Stores the base colour a theme published and repaints the splash surface with it.
@@ -228,6 +240,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let changed = preferences.splashBaseColor != hex
         preferences.splashBaseColor = hex
         paintBase(color)
+        devTools.applyTheme(base: hex)
         // A template icon that follows the theme is painted in this very colour, so a plane switch
         // has to re-derive it — otherwise the icon keeps the previous theme's background until the
         // icon settings are touched again.
@@ -301,5 +314,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         default:
             NSApp.appearance = nil
         }
+        devTools.applyTheme(base: preferences.splashBaseColor)
     }
 }

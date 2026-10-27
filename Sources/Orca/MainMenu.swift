@@ -109,11 +109,11 @@ enum MainMenu {
             modifiers: [.command, .control]
         )
         menu.add(
-            title: "Web Inspector",
-            action: #selector(MainWindowController.toggleInspector(_:)),
-            key: "i",
+            title: "Developer Tools",
+            action: #selector(MainWindowController.toggleDevTools(_:)),
+            key: String(UnicodeScalar(NSF12FunctionKey)!),
             target: window,
-            modifiers: [.command, .option]
+            modifiers: []
         )
         return wrap(menu, title: "View")
     }

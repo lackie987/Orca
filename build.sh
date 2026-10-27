@@ -36,6 +36,9 @@ cp "$ICON_SOURCE" "$APP/Contents/Resources/AppIcon.icns"
 cp "$DIR/Resources/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/Icons"
 cp "$DIR/Resources/Icons/"* "$APP/Contents/Resources/Icons/"
+# The developer tools are a panel front end plus the page-side agent, both plain web assets.
+mkdir -p "$APP/Contents/Resources/DevTools"
+cp "$DIR/Resources/DevTools/"* "$APP/Contents/Resources/DevTools/"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
 
 echo "▸ Signing ($SIGN_IDENTITY)"
