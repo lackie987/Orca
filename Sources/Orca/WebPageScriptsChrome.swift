@@ -48,11 +48,16 @@ extension WebPageScripts {
     """#
 
     /// Mirrors the web UI theme source so native chrome follows the page palette.
+    ///
+    /// Only an explicit `data-ds-theme-source` is sent: before the host writes it, defaulting to
+    /// `system` would report the Mac's scheme as if it were the saved theme and let the startup
+    /// surface follow a transient plane.
     static let theme = #"""
     (function () {
       function sendTheme() {
         try {
-          var source = document.documentElement.getAttribute('data-ds-theme-source') || 'system';
+          var source = document.documentElement.getAttribute('data-ds-theme-source');
+          if (!source) { return; }
           window.webkit.messageHandlers.themeSource.postMessage(source);
         } catch (error) {}
       }

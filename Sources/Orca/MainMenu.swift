@@ -108,19 +108,19 @@ enum MainMenu {
             target: nil,
             modifiers: [.command, .control]
         )
+        // Dev-tools shortcuts (F12, ⌥⌘I, ⌘⇧C) are owned solely by InspectorController's local key
+        // monitor, which must swallow the key before the page sees it. Do NOT give these menu items a
+        // keyEquivalent — a second binding would call selectElement()/toggle() twice per press and
+        // make the picker or inspector flicker on then straight back off.
         menu.add(
             title: "Developer Tools",
             action: #selector(MainWindowController.toggleDevTools(_:)),
-            key: String(UnicodeScalar(NSF12FunctionKey)!),
-            target: window,
-            modifiers: []
+            target: window
         )
         menu.add(
             title: "Select Element for Inspection",
             action: #selector(MainWindowController.selectElementForInspection(_:)),
-            key: "c",
-            target: window,
-            modifiers: [.command, .shift]
+            target: window
         )
         menu.add(
             title: "Show Console",

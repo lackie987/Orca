@@ -223,16 +223,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     /// Stores the base colour a theme published and repaints the splash surface with it.
+    ///
+    /// The icon is only touched in its `theme` follow mode; `none` and `system` keep the page
+    /// theme out of the Dock.
     private func applySplashBase(_ hex: String) {
         guard let color = ColorHex.color(hex) else { return }
         let changed = preferences.splashBaseColor != hex
         preferences.splashBaseColor = hex
         paintBase(color)
-        // A template icon that follows the theme is painted in this very colour, so a plane switch
-        // has to re-derive it — otherwise the icon keeps the previous theme's background until the
-        // icon settings are touched again.
-        if changed, AppIcon.followsBaseColor(preferences) {
-            AppIconInstaller.refreshDock(preferences)
+        if changed, AppIcon.followsTheme(preferences) {
+            AppIconInstaller.applyCurrent(preferences, forApp: Bundle.main.bundlePath)
         }
     }
 
@@ -279,6 +279,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // surface up in that case rather than dissolving onto a page that is already being replaced.
         guard case .ready = service.state else { return }
         hasRevealedPage = true
+        // The page owns the window from here on; the palette bridge may trust its reports outright.
+        page.notePageRevealed()
         splash.dismiss()
     }
 
@@ -293,7 +295,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func applyTheme(_ source: String) {
-        switch source {
+        let normalized = (source == "light" || source == "dark") ? source : "system"
+        // Before the page owns the window, a source that contradicts the choice settled in the
+        // previous session is the host applying the system scheme for a frame while its saved theme
+        // loads. Following it flips the window chrome — and, through the palette bridge, the startup
+        // plane — to the wrong scheme, so keep the settled choice until the page is revealed.
+        if !page.isRevealed, !preferences.themeSource.isEmpty, normalized != preferences.themeSource {
+            return
+        }
+        preferences.themeSource = normalized
+        switch normalized {
         case "dark":
             NSApp.appearance = NSAppearance(named: .darkAqua)
         case "light":

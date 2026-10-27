@@ -89,7 +89,10 @@ sequenceDiagram
   只有被无关程序占用才改用系统分配的空闲端口——杀别人的进程不是 Orca 该做的事。
 - **启动页**：透明磨砂玻璃底，图标是**透明底的角色标**（`Resources/Icons/OrcaMark.png`，84pt 槽位），
   按 app 图标同一套连续曲率 squircle 裁形（`IconProcessor.rounded`），所以轮廓和 Dock 里那个是同一个形状。
-  它没有自己的背景色，永远落在主题底色上——换主题不会出现「图标和背景两个颜色」。
+  它没有自己的背景色，永远落在主题底色上——换主题不会出现「图标和背景两个颜色」。文字、按钮和磨砂材质
+  也跟着**底色本身的明暗**走，而不是系统外观：系统暗色 + 浅色主题时，启动页仍是浅底深字。
+  启动阶段宿主可能先上报一帧系统方案的底色；**页面首帧之前只接受与已保存主题来源（没有来源时用上次底色）
+  一致的底色**，瞬时深色不会刷到启动页，也不会被记成下次启动的底色。
 - **交接时机不看秒数**：启动页撤除等的是页面自己的首帧事件，不是「服务就绪 + 等 N 秒」。
   web view 自身不画背景、容器铺的是主题 base，所以淡出过程中任何缝隙看到的都是页面自己的颜色，不是默认窗口灰。
 - **兜底**：页面加载失败（`didFail*`）立即撤；12 秒仍未报首帧（脚本被拦等极端情况）也强行撤，避免启动页焊死。
@@ -139,7 +142,7 @@ sequenceDiagram
 | 重启本地服务 | ⇧⌘R |
 | 在浏览器打开（带 token 的地址） | ⇧⌘O |
 | 开发者工具（WebKit Web Inspector） | F12 或 ⌥⌘I |
-| 元素拾取（在页面上点一个元素） | ⌘⇧C |
+| 元素拾取（在页面上点一个元素，再按一次退出） | ⌘⇧C |
 | Orca 设置（端口 / Profile / 命令） | ⌥⌘, |
 | 退出 | ⌘Q |
 
@@ -164,8 +167,11 @@ sequenceDiagram
 
 ### Electron 默认菜单对照
 
-Electron 默认菜单的键位整理在 `ElectronDefaults`（`ElectronShortcuts.swift`）。已有的动作不重复注册，
-缺口交给 DSH 桌面快捷键录制，不再安装空 Carbon 占位：
+Electron 默认菜单的键位对照整理在 `ElectronDefaults`（`ElectronShortcuts.swift`）。这张表现在**没有消费者**——
+Orca 自己的菜单与响应链已经覆盖它列出的每一个组合——所以整段注释保留、不删：它记录的是「哪个 Electron 组合
+对应哪个 Orca 动作、哪两处不一致」这个判断。要恢复它，得连同当时消费 `coverage` 的 while-active 占位逻辑一起接回。
+
+结论不变，仍是这张表想说明的事：已有的动作不重复注册，缺口交给 DSH 桌面快捷键录制，不装空 Carbon 占位。
 
 | 状态 | 条目 |
 | --- | --- |
@@ -183,7 +189,7 @@ Sources、Network、Timelines、Storage、Graphics、Layers 全都在，dock 在
 | 操作 | 快捷键 | 说明 |
 | --- | --- | --- |
 | 打开 / 关闭检查器 | F12、⌥⌘I | 与浏览器同义 |
-| 元素拾取 | ⌘⇧C | 打开检查器并进入拾取模式：页面里悬停即高亮，点击就选中那个元素 |
+| 元素拾取 | ⌘⇧C | 打开检查器并进入拾取模式：页面里悬停即高亮，点击就选中那个元素；拾取中再按一次停止，页面恢复普通点击 |
 | 只看控制台 | View → Show Console | 直接落到 Console 页签 |
 | 右键「检查元素」 | 右键菜单 | WebKit 提供的菜单项（靠开发者附加项，见下） |
 
@@ -196,8 +202,9 @@ Sources、Network、Timelines、Storage、Graphics、Layers 全都在，dock 在
 也带着它）。同时 `WKPreferences._developerExtrasEnabled` 被打开——**光设 `isInspectable` 不够**，
 它只负责把页面暴露给 Safari，不会在应用内构出检查器，右键菜单也不会出现「检查元素」。
 
-打开失败时不会静默：0.8 秒后若 `isVisible` 仍为 false，会弹一条 sheet 说明缺了哪个 entitlement、怎么重建
-（这条校验也防「按了 F12 又立刻按一次」被误判：关闭会取消上一次的校验）。
+打开失败时不会静默：3 秒后若前端仍未构建（`inspectorWebView` 不存在），会弹一条 sheet 说明缺了哪个
+entitlement、怎么重建。判据只能看前端在不在——冷启动时前端本身要 0.5–1 秒才可见，用 `isVisible`
+会把「正在加载」误报成「没打开」，而那条 sheet 恰好盖住刚打开的检查器。关闭检查器会取消这次校验。
 
 > 早期版本里这套工具是自研的（注入 agent + 原生 dock + 面板前端，四个页签）。既然原生 inspector 完整可用，
 > 就没必要维护一份更弱的复制品，自研实现留在 git 历史里（`1f1a012` 及之前），需要时可以取回。
@@ -216,8 +223,10 @@ Sources、Network、Timelines、Storage、Graphics、Layers 全都在，dock 在
 | dsh command | `dsh` | PATH 名或绝对路径；GUI 进程继承 launchd 的最小 PATH，应用会自动在 `~/.npm-global/bin`、`~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 等目录查找 |
 | Keep the local service running after Orca quits | 关 | 退出后保留服务，下次启动直接复用 |
 
-改端口 / Profile / 命令会重启服务。改端口会换页面 origin，但 localStorage 里的界面状态（主题、插件设置、上次会话等）
-会先被快照、再在新 origin 的 `documentStart` 阶段写回，**不会重置**；各插件写在磁盘上的服务端配置本来就不受影响。
+改端口 / Profile / 命令会重启服务。各插件写在磁盘上的服务端配置不受影响；页面 origin 下的 localStorage
+（主题、界面状态等）**目前会从新的空存储开始**——迁移链路只接好了写入端：`WebPageStorage` 的写回脚本与
+`WebPageController.stageStorage(for:)` 都在，但负责抓快照的 `captureLocalStorage()` 没有调用者，
+`pendingStorage` 恒为 nil。接上它要动 `load(_:)` 的时机（抓取是异步的），属于行为改动。
 
 ## 图标
 
@@ -225,17 +234,37 @@ Sources、Network、Timelines、Storage、Graphics、Layers 全都在，dock 在
 
 | 预设 | 来源 |
 | --- | --- |
-| `orca` | 初始图标，不跟主题 |
-| `dawn` / `main` / `moon` | 三套主题变体，可以固定，也可以跟页面明暗走 |
-| `template` | `OrcaOutline.svg` 模板 + 自选底色（可跟随主题基色） |
-| `custom` | 用户自选的图片（png/jpg/heic/tiff/gif/webp 都收） |
+| `orca` | 初始图标，固定；跟随控件禁用 |
+| `dawn` / `main` / `moon` | 三套主题变体，可切换 不跟随 / 随主题 / 随系统 |
+| `template` | `OrcaOutline.svg` 模板 + 自选底色，可切换 不跟随（自选色）/ 随主题（页面底色）/ 随系统（`#faf4ed` / `#191724`） |
+| `custom` | 用户自选的图片（png/jpg/heic/tiff/gif/webp 都收），固定；跟随控件禁用 |
 
 所有内置素材都是满幅画稿，一律经 `IconProcessor` 合成到 Apple 的图标网格（1024 画布 / 824 主体 / 内缩 100），
 裁成连续曲率 squircle——满幅方块贴上去会比系统图标明显偏大、而且是直角。`IcnsWriter` 直接写 PNG-backed 的
 `.icns` 条目，不起 `iconutil`、不落临时 `.iconset`。
 
-选定结果会写进已安装 bundle 的 `AppIcon.icns`（Finder 与下次启动读的就是它），同时刷新运行中的 Dock tile 和
-`NSWorkspace` 元数据；`build.sh` 重建时会沿用这份，而不是退回仓库默认图。
+选定结果会写进已安装 bundle 的 `AppIcon.icns`（Finder 与下次启动读的就是它），并刷新运行中的 Dock tile；
+`build.sh` 重建时会沿用这份，而不是退回仓库默认图。
+
+写 bundle 有两件连带的事，都在 `AppIconInstaller` 里：
+
+- `AppIcon.icns` 是被签名的资源，写完必须**重新 ad-hoc 签名**（`AppBundleSeal`，0.9s 合并一次、后台串行、
+  退出前 flush），否则 `codesign --verify` 会报 `file modified`。签名沿用 `identifier "com.xu.orca"` 与
+  `--preserve-metadata=entitlements`，TCC 授权才不会被重新询问。
+- IconServices 以 **bundle 自身的修改时间**为图标缓存令牌，不看 `Contents/Resources/AppIcon.icns`，所以
+  写完还要把 bundle 的时间戳推到图标之后（`markBundleChanged`）。只在图标比 bundle 新时才推，稳态启动
+  不会每次重建索引。
+
+图标的跟随是三态，**同一时刻只有一个来源参与取色**：
+
+| 模式 | 颜色来源 | 触发重写 |
+| --- | --- | --- |
+| 不跟随 | 图标选择本身（模板用自选底色，主题预设用固定素材） | 只在改图标设置时 |
+| 随主题 | 页面主题：模板取页面 base，主题预设取页面变体 | 页面主题切换时 |
+| 随系统 | macOS 外观：浅色 `#faf4ed` / 深色 `#191724`，主题预设浅色 Dawn、深色用所选深色 | 系统切亮暗时 |
+
+「不跟随」和「随系统」都不受页面主题影响，手动切浅色不会改图标；「随主题」才让页面底色/变体参与。
+Orca 完全退出后系统再切外观（随系统模式），静态图标无法自行更新，要等下次启动。
 
 ## 数据与日志
 
@@ -264,6 +293,7 @@ Sources/Orca/
     Layout.swift                  铺满父视图的约束助手
     ColorHex.swift                #rrggbb ↔ NSColor、亮度判断
     ThemeColor.swift              首帧之前铺的底色（含首次启动兜底）
+    ProfileFont.swift             从 profile 的 cordis.patch.yml 读文本字体栈（启动页对齐页面）
 
   Web 页面
     WebPageController.swift       WKWebView 本体、注入、缩放、全屏镜像
@@ -271,7 +301,7 @@ Sources/Orca/
     WebPageDialogs.swift          JS 弹窗、权限、下载与面板呈现
     WebPagePopup.swift            页面自己开的弹窗窗口（登录授权页）
     JavaScriptPanels.swift        alert/confirm 面板（应用窗口与弹窗共用）
-    WebPageStorage.swift          换端口时把 localStorage 快照迁到新 origin
+    WebPageStorage.swift          换端口时把 localStorage 快照迁到新 origin（抓取端当前未接入）
     WebDiagnostics.swift          页面 console 日志
 
   注入脚本
@@ -302,13 +332,14 @@ Sources/Orca/
     AppIcon.swift                 预设解析、预览、启动页角色标
     IconProcessor.swift           任意位图 → macOS 标准图标（squircle 合成）
     IcnsWriter.swift              直接写 PNG-backed .icns
-    AppIconInstaller.swift        写入 Dock / bundle / Finder 元数据
+    AppIconInstaller.swift        写入 Dock tile 与 bundle 的 AppIcon.icns，并更新缓存令牌
+    AppBundleSeal.swift           改图标后重新 ad-hoc 签名（合并、后台、退出前 flush）
 
   设置与快捷键
     Preferences.swift             UserDefaults 里的设置项
     TitleBarMode.swift            红绿灯档位
     GlobalHotkeys.swift           Carbon 全局热键层（作用域 + 空动作）
-    ElectronShortcuts.swift       Electron 默认菜单键位清单与缺口占位
+    ElectronShortcuts.swift       Electron 默认菜单键位对照（现无消费者，整段注释保留）
 
 Resources/AppIcon.icns            仓库默认图标
 Resources/Icons/                  六个预设的素材（含 OrcaMark.png / OrcaOutline.svg）
@@ -355,7 +386,6 @@ package.sh                        打 DMG / PKG 安装包（dist/，附 SHA-256�
 - 带 `get-task-allow` 意味着任何同用户进程都能附加调试器到 Orca。这是本地开发壳的取舍：
   要么接受它、要么没有检查器。要发布给不特定用户时，请自行决定是否保留。
 - 检查器只挂在主窗口的 web view 上；页面自己开的弹窗（登录授权页）不在它的覆盖范围。
-- 面板只服务主窗口；页面自己开的弹窗（登录授权页）不在它的覆盖范围。
 - Orca 自带一个 `dsh web` 实例。如果同时开着终端里的 `dsh web`（3080），两个实例共享 `~/.dsh` 存储，
   会话引用与工作区状态可能互相干扰；日常建议只保留 Orca。若那个实例占用了设置里的端口，下一次启动会把它回收以保住 origin。
 - ad-hoc 签名，未公证；本机构建不带隔离属性，从源码重建不需要绕过 Gatekeeper（从网络下载的安装包则需要）。

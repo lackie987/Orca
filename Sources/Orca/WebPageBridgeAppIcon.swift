@@ -10,11 +10,12 @@ import WebKit
 extension WebPageController {
     /// Reads and writes the app-icon choice; the `dsh-app-icon` plugin drives this.
     ///
-    /// `get` reports the saved preset and whether it follows the theme. `preset` picks a built-in
-    /// icon, `follow` toggles theme-following for the themed three, `variant` reports the current
-    /// theme variant, `set` opens the image picker for a custom picture and `reset` returns to the
-    /// initial `orca` icon. Every write replies with the state it accepted, so the page never has
-    /// to assume its write landed. The `.app` write is bundle metadata, so it survives updates.
+    /// `get` reports the saved preset and whether it follows the Mac's appearance. `preset` picks a
+    /// built-in icon, `follow` toggles system-following for the themed three, `variant` is accepted
+    /// for older pages but no longer re-tints anything, `set` opens the image picker for a custom
+    /// picture and `reset` returns to the initial `orca` icon. Every write replies with the state it
+    /// accepted, so the page never has to assume its write landed. The `.app` write is bundle
+    /// metadata, so it survives updates.
     func handleAppIconMessage(_ message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
         guard let payload = message.body as? [String: Any],
               let kind = payload["kind"] as? String else {
@@ -49,15 +50,23 @@ extension WebPageController {
                     replyHandler(self.iconState(), nil)
                     return
                 }
-                let previous = self.preferences.appIconResolvedVariant
-                self.preferences.appIconResolvedVariant = variant
-                // Only a following themed preset changes now, and only when the variant actually
-                // moved — re-applying rewrites the bundle's icon file, so repeats must stay cheap.
-                if previous != variant,
-                   self.preferences.appIconFollowsTheme,
+                self.preferences.appIconThemeVariant = variant
+                // Theme mode is the only place a page variant may move the icon; system mode uses
+                // the Mac and none keeps the chosen artwork.
+                if AppIcon.followsTheme(self.preferences),
                    AppIcon.themed.contains(self.preferences.appIconPreset) {
                     self.reapplyIcon()
                 }
+                replyHandler(self.iconState(), nil)
+            case "followMode":
+                guard let raw = payload["mode"] as? String,
+                      let mode = AppIcon.FollowMode(rawValue: raw)
+                else {
+                    replyHandler(self.iconState(), nil)
+                    return
+                }
+                self.preferences.appIconFollowMode = mode.rawValue
+                self.reapplyIcon()
                 replyHandler(self.iconState(), nil)
             case "reset":
                 self.preferences.appIconPreset = "orca"
@@ -96,12 +105,23 @@ extension WebPageController {
     }
 
     /// Snapshot the page reads back after every write.
+    ///
+    /// `templateBackground` is the plane the icon actually uses right now; the settings row draws
+    /// its preview with that instead of re-deriving the colour from the page theme.
+    /// `displayVariant` is the artwork the themed presets currently resolve to. `followMode` and
+    /// `followCapable` drive the tri-state switcher.
     func iconState() -> [String: Any] {
-        [
+        let background = AppIcon.templateColorHex(preferences)
+        return [
             "preset": preferences.appIconPreset,
             "follow": preferences.appIconFollowsTheme,
-            "templateColor": AppIcon.templateColorHex(preferences),
+            "followMode": AppIcon.followMode(preferences).rawValue,
+            "followCapable": AppIcon.canFollow(preferences),
+            "displayVariant": AppIcon.displayVariant(preferences),
+            "templateColor": AppIcon.storedTemplateColorHex(preferences),
+            "templateBackground": background,
             "templateFollow": preferences.appIconTemplateFollowsTheme,
+            "systemAppearance": AppIcon.systemIsDark ? "dark" : "light",
         ]
     }
 

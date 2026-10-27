@@ -107,9 +107,46 @@ final class WebPageController: NSObject, InspectorPage {
     ///
     /// Called while the old page is still on screen — the one moment its store is reachable, since
     /// the new origin cannot read it once the URL has changed.
+    ///
+    /// No caller today: `stageStorage(for:)` still replays `pendingStorage`, but nothing fills it,
+    /// so a port change hands the page an empty store. Reconnecting this to the restart path is a
+    /// behaviour change — the capture is asynchronous, so `load(_:)` would have to wait for it.
     func captureLocalStorage() {
         WebPageStorage.capture(from: webView) { [weak self] snapshot in
             DispatchQueue.main.async { self?.pendingStorage = snapshot }
+        }
+    }
+
+    /// True once the startup surface has handed the window over to the page.
+    ///
+    /// A first painted frame is not enough to trust the page's palette: the boot stream can keep
+    /// reporting the system scheme while the saved theme settles, and the hand-over can be delayed
+    /// by a slow service. Until the page actually owns the window, a report is validated against the
+    /// settled theme instead of being accepted outright — otherwise the startup plane flashes the
+    /// wrong scheme and the transient is persisted for the next launch.
+    private(set) var isRevealed = false
+
+    /// Marks a fresh document; every load path calls this before the web view starts loading.
+    func notePageLoading() {
+        isRevealed = false
+    }
+
+    /// Marks the hand-over from the startup surface to the page, after which its palette is trusted.
+    func notePageRevealed() {
+        isRevealed = true
+    }
+
+    /// Hands a base colour the page is painting to the shell.
+    ///
+    /// Every path that learns the painted plane — the palette bridge and the reload-time sample —
+    /// goes through here, so `MainWindowController.applySplashBase` stays the only writer of the
+    /// stored base. That single owner is what lets it tell a real move from a repeat, and therefore
+    /// when a theme-following template icon has to be re-derived.
+    func applyPaletteBase(_ hex: String) {
+        if let onPaletteBase {
+            onPaletteBase(hex)
+        } else {
+            preferences.splashBaseColor = hex
         }
     }
 
@@ -118,6 +155,7 @@ final class WebPageController: NSObject, InspectorPage {
         refreshUserScripts()
         stageStorage(for: url)
         accessURL = url
+        notePageLoading()
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         webView.load(request)
@@ -150,6 +188,7 @@ final class WebPageController: NSObject, InspectorPage {
     func reload() {
         withCurrentBase {
             self.refreshUserScripts()
+            self.notePageLoading()
             self.webView.reload()
         }
     }
@@ -157,6 +196,7 @@ final class WebPageController: NSObject, InspectorPage {
     func reloadFromOrigin() {
         withCurrentBase {
             self.refreshUserScripts()
+            self.notePageLoading()
             self.webView.reloadFromOrigin()
         }
     }
@@ -194,7 +234,9 @@ final class WebPageController: NSObject, InspectorPage {
         """
         webView.evaluateJavaScript(script) { [weak self] result, _ in
             if let self, let raw = result as? String, let hex = ColorHex.fromCSS(raw) {
-                self.preferences.splashBaseColor = hex
+                // Same door as a palette report: one owner stores the plane and re-derives a
+                // theme-following icon when the colour really moved.
+                self.applyPaletteBase(hex)
             }
             finish()
         }

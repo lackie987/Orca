@@ -240,9 +240,10 @@ final class SplashView: NSView {
         // the material tint through and pull the surface off the theme colour. With a page behind,
         // drop just enough to keep the frost readable while the fill still holds the colour.
         baseFill.layer?.opacity = showsPageBehind ? Self.frostedBaseOpacity : 1
-        // The material resolves against the effective appearance, so a dark plane has to put the
-        // glass itself in dark mode — otherwise the veil turns milky and the light copy loses contrast.
-        backdrop.appearance = isDarkBase ? NSAppearance(named: .darkAqua) : nil
+        // The surface owns the plane, so its ink and its glass resolve against that plane, not the
+        // system. A dark Mac running the light theme otherwise paints white copy on a cream plane
+        // and lets the material's dark veil through the frosted fill.
+        appearance = baseColor == nil ? nil : NSAppearance(named: isDarkBase ? .darkAqua : .aqua)
         applyTextColors()
     }
 

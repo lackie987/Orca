@@ -1,27 +1,70 @@
 import AppKit
 
-/// Resolves which icon Orca should show from the saved preset and the reported theme variant.
+/// Resolves which icon Orca should show from the saved preset and its follow mode.
 ///
-/// Four built-in presets ship in `Resources/Icons`: `orca` (the initial icon, which never follows
-/// the theme) and the themed `dawn` / `main` / `moon` variants. The themed three either stay on
-/// the chosen variant or follow the theme; `custom` is a picture the user picked. Every built-in
-/// source is full-bleed artwork, so it is composed through `IconProcessor` — otherwise it would
-/// sit larger than a system icon and show square corners.
+/// Four presets ship in `Resources/Icons`: `orca` (the initial icon, which never follows) and the
+/// themed `dawn` / `main` / `moon` variants. Each icon has three follow modes: `none` keeps the
+/// selection exactly as picked, `theme` follows the page's base colour / variant, and `system`
+/// follows the Mac's light/dark appearance. `custom` is a picture the user picked. Every built-in
+/// source is full-bleed artwork, so it is composed through `IconProcessor` — otherwise it would sit
+/// larger than a system icon and show square corners.
 enum AppIcon {
+    /// How an icon reacts to its surroundings.
+    enum FollowMode: String {
+        /// The icon as selected: fixed colour, fixed variant, no outside influence.
+        case none
+        /// Follow the page theme: its base colour for the template, its variant for themed art.
+        case theme
+        /// Follow the Mac's light/dark appearance, independent of the page theme.
+        case system
+    }
+
     /// Preset identifiers, in the order the settings row shows them. The bridge accepts these and
     /// the row asks for a preview of each.
     static let presets = ["orca", "dawn", "main", "moon", "template", "custom"]
 
-    /// The presets that may follow the theme.
+    /// The presets that may follow the Mac's appearance.
     static let themed = ["dawn", "main", "moon"]
 
+    /// The saved follow mode, migrating the legacy boolean switches when it has never been set.
+    ///
+    /// The old template/themed switches both meant "follow" before the tri-state existed; the
+    /// behavior they were left on was the system-follow one, so that is the migration target.
+    static func followMode(_ preferences: Preferences) -> FollowMode {
+        if let mode = FollowMode(rawValue: preferences.appIconFollowMode) { return mode }
+        let followed = preferences.appIconPreset == "template"
+            ? preferences.appIconTemplateFollowsTheme
+            : (themed.contains(preferences.appIconPreset) && preferences.appIconFollowsTheme)
+        return followed ? .system : .none
+    }
+
+    /// Whether the selected preset has a colour or variant that can follow anything.
+    static func canFollow(_ preferences: Preferences) -> Bool {
+        preferences.appIconPreset == "template" || themed.contains(preferences.appIconPreset)
+    }
+
     /// The variant actually displayed for the saved preset.
+    ///
+    /// `none` keeps the chosen variant; `system` uses the Mac's appearance; `theme` uses the
+    /// page-theme variant the bridge last reported, falling back to the page base's darkness.
+    /// A `dawn` preset has no dark counterpart, so a dark plane falls back to `main`.
     static func resolvedVariant(_ preferences: Preferences) -> String {
         let preset = preferences.appIconPreset
         guard themed.contains(preset) else { return "orca" }
-        guard preferences.appIconFollowsTheme else { return preset }
-        let reported = preferences.appIconResolvedVariant
-        return themed.contains(reported) ? reported : preset
+        switch followMode(preferences) {
+        case .none:
+            return preset
+        case .system:
+            guard systemIsDark else { return "dawn" }
+            return preset == "dawn" ? "main" : preset
+        case .theme:
+            let reported = preferences.appIconThemeVariant
+            if themed.contains(reported) { return reported }
+            if let base = ColorHex.color(preferences.splashBaseColor), ColorHex.isDark(base) {
+                return preset == "dawn" ? "main" : preset
+            }
+            return "dawn"
+        }
     }
 
     /// The composed icon to show, or `nil` when no artwork is available and the bundled icon
@@ -55,33 +98,70 @@ enum AppIcon {
         NSImage(named: "AppIcon") ?? NSApp.applicationIconImage
     }
 
-    /// Whether the resolved icon is painted in the theme's base colour.
+    /// Whether the saved icon re-tints itself when the Mac switches between light and dark.
     ///
-    /// Such an icon has to be recomposed whenever the theme switches planes, otherwise it keeps the
-    /// previous plane's colour and stops matching the surface it sits on.
-    static func followsBaseColor(_ preferences: Preferences) -> Bool {
-        preferences.appIconPreset == "template" && preferences.appIconTemplateFollowsTheme
+    /// This is the icon's own mode, not the page's: the shell pins `NSApp.appearance` to the web
+    /// theme, so the page can paint light on a dark Mac without touching the Dock icon.
+    static func followsSystemAppearance(_ preferences: Preferences) -> Bool {
+        canFollow(preferences) && followMode(preferences) == .system
     }
 
-    /// Background colour for the template, following the theme's base plane when asked to.
+    /// Whether the saved icon re-tints itself when the page theme changes.
+    static func followsTheme(_ preferences: Preferences) -> Bool {
+        canFollow(preferences) && followMode(preferences) == .theme
+    }
+
+    /// The variant used for the settings row's trigger preview: themed presets show the variant
+    /// the icon is actually drawn with, everything else shows its own artwork.
+    static func displayVariant(_ preferences: Preferences) -> String {
+        let preset = preferences.appIconPreset
+        return themed.contains(preset) ? resolvedVariant(preferences) : preset
+    }
+
+    /// The icon's own light and dark planes, independent of the page theme.
+    static let systemLightBackground = "#faf4ed"
+    static let systemDarkBackground = "#191724"
+
+    /// The Mac's appearance, independent of `NSApp.appearance`.
+    ///
+    /// `NSApp.effectiveAppearance` answers what the shell pinned the app to (the page theme), not
+    /// what the system is doing. The global defaults keep the real system answer; the dark value is
+    /// `"Dark"`, absent in light mode.
+    static var systemIsDark: Bool {
+        ThemeColor.systemIsDark
+    }
+
+    /// Background colour for the template icon.
+    ///
+    /// `none` keeps the chosen colour, `theme` takes the page's published base, and `system` picks
+    /// the icon's own light/dark plane from the Mac. The page theme never leaks into system mode.
     static func templateColor(_ preferences: Preferences) -> NSColor {
-        if preferences.appIconTemplateFollowsTheme,
-           let theme = ColorHex.color(preferences.splashBaseColor) {
-            return theme
+        switch followMode(preferences) {
+        case .none:
+            if let color = ColorHex.color(preferences.appIconTemplateColor) { return color }
+            return ColorHex.color(systemDarkBackground) ?? .windowBackgroundColor
+        case .theme:
+            if let color = ColorHex.color(preferences.splashBaseColor) { return color }
+            let hex = systemIsDark ? systemDarkBackground : systemLightBackground
+            return ColorHex.color(hex) ?? .windowBackgroundColor
+        case .system:
+            let hex = systemIsDark ? systemDarkBackground : systemLightBackground
+            return ColorHex.color(hex) ?? .windowBackgroundColor
         }
-        if let color = ColorHex.color(preferences.appIconTemplateColor) { return color }
-        if let color = ColorHex.color(preferences.splashBaseColor) { return color }
-        return NSColor(
-            srgbRed: CGFloat(0x23) / 255,
-            green: CGFloat(0x21) / 255,
-            blue: CGFloat(0x36) / 255,
-            alpha: 1
-        )
     }
 
     /// The template colour as `#rrggbb`, for the settings row's colour well.
     static func templateColorHex(_ preferences: Preferences) -> String {
         ColorHex.string(templateColor(preferences)) ?? "#232136"
+    }
+
+    /// The template's own fixed colour, independent of the follow mode. The settings row's colour
+    /// well edits this; the preview uses `templateColorHex` (the plane currently painted).
+    static func storedTemplateColorHex(_ preferences: Preferences) -> String {
+        let color = ColorHex.color(preferences.appIconTemplateColor)
+            ?? ColorHex.color(systemDarkBackground)
+            ?? .windowBackgroundColor
+        return ColorHex.string(color) ?? systemDarkBackground
     }
 
     /// Base64 PNGs of the icons, for the settings row's chips.

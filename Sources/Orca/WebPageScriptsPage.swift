@@ -60,8 +60,8 @@ extension WebPageScripts {
     """#
 
     /// Exposes the app-icon bridge so the `dsh-app-icon` plugin can read and change Orca's icon
-    /// through `window.__ORCA_APP_ICON__`: built-in presets, theme-following, the current theme
-    /// variant, a custom picture and a reset to the initial icon.
+    /// through `window.__ORCA_APP_ICON__`: built-in presets, the tri-state follow mode, the current
+    /// theme variant, a custom picture and a reset to the initial icon.
     static let appIcon = #"""
     (function () {
       if (window.__ORCA_APP_ICON__ !== undefined) { return; }
@@ -77,6 +77,9 @@ extension WebPageScripts {
             },
             setFollow: function (follow) {
               return window.webkit.messageHandlers.orcaAppIcon.postMessage({ kind: 'follow', follow: follow });
+            },
+            setFollowMode: function (mode) {
+              return window.webkit.messageHandlers.orcaAppIcon.postMessage({ kind: 'followMode', mode: mode });
             },
             setThemeVariant: function (variant) {
               return window.webkit.messageHandlers.orcaAppIcon.postMessage({ kind: 'variant', variant: variant });

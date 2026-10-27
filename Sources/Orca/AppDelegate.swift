@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var service: ServiceController!
     private var windowController: MainWindowController!
     private var settingsController: SettingsWindowController?
+    /// Re-tints the icon when the Mac itself switches appearance, while Orca stays open.
+    private var appearanceObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         service = ServiceController(preferences: preferences)
@@ -20,6 +22,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController.showWindow(nil)
         windowController.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+
+        // In system mode the icon's light/dark plane follows the Mac, not the page theme. The shell
+        // pins `NSApp.appearance` to the web theme, so AppKit's appearance KVO would answer the
+        // page; the distributed system notification is the one that answers the machine.
+        appearanceObserver = DistributedNotificationCenter.default.addObserver(
+            forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, AppIcon.followsSystemAppearance(self.preferences) else { return }
+            AppIconInstaller.applyCurrent(self.preferences, forApp: Bundle.main.bundlePath)
+        }
 
         // Resolve the saved preset into the bundle's icon file too, not just the Dock tile: that
         // file is what Finder, the next launch and the startup surface read, so leaving it behind
@@ -54,7 +68,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let appearanceObserver {
+            DistributedNotificationCenter.default.removeObserver(appearanceObserver)
+        }
         hotkeys.unregisterAll()
+        // An icon written moments before quitting still owes the bundle its signature; the queued
+        // one would die with the process and leave the installed app sealed against the old icon.
+        AppBundleSeal.flush(for: Bundle.main.bundlePath)
         service.shutdown()
     }
 

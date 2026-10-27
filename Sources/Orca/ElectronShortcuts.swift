@@ -1,3 +1,15 @@
+// Electron's default application-menu accelerators, kept for parity.
+//
+// Nothing in the shell reads this table any more: Orca's own menu and responder chain cover every
+// accelerator it lists, so it stopped being the source of a registration pass and became dead
+// weight. It is commented out rather than deleted because it records a decision — which Electron
+// combination corresponds to which Orca action, and where the two disagree (`forceReload` stays
+// with Orca's service restart, developer tools sit on F12 instead of ⌥⌘I).
+//
+// Restore it together with the while-active placeholder pass that used to consume `coverage` —
+// the `missing` entries were only ever useful to that pass, and without it the table has no
+// consumer on its own.
+/*
 import AppKit
 import Carbon.HIToolbox
 
@@ -66,3 +78,4 @@ enum ElectronDefaults {
         )
     }
 }
+*/

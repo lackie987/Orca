@@ -1,32 +1,55 @@
 import AppKit
 
-/// Applies an icon to every native surface and persists a picture the user picked.
+/// Applies an icon to both native surfaces and persists a picture the user picked.
 ///
-/// One composed image drives the running Dock / app-switcher tile, the `.app`'s icon file and its
-/// Finder metadata. The startup surface draws the transparent mark instead, so it never depends on
-/// whatever this ended up writing. Keeping the system calls in one place means the bridge and the
-/// launch-time apply cannot drift apart.
+/// One composed image drives the running Dock / app-switcher tile and the `.app`'s icon file — the
+/// file Finder reads on its own, so no separate metadata record is written. The startup surface
+/// draws the transparent mark instead, so it never depends on whatever this ended up writing.
+/// Keeping the system calls in one place means the bridge and the launch-time apply cannot drift
+/// apart.
 enum AppIconInstaller {
-    /// Pushes `icon` to the running Dock tile, the `.app`'s icon file and its Finder metadata.
+    /// Pushes `icon` to the running Dock tile and the `.app`'s icon file.
     ///
-    /// The bundle's `AppIcon.icns` is what Finder and the next launch read, so writing it is what
-    /// makes the choice survive quitting — `NSWorkspace` metadata alone is wiped whenever the bundle
-    /// is replaced. Both copies are kept in step; if either write fails, the other still shows the
-    /// choice.
+    /// The bundle's `AppIcon.icns` is what Finder, the next launch and LaunchServices read, so
+    /// writing it is what makes the choice survive quitting — `NSWorkspace` metadata alone is wiped
+    /// whenever the bundle is replaced. It is also a sealed resource, so a write is followed by a
+    /// fresh signature (see `AppBundleSeal`), and the bundle's timestamp is bumped so the system
+    /// stops serving the icon it cached (see `markBundleChanged`).
     static func apply(_ icon: NSImage, forApp appPath: String) {
         NSApp.applicationIconImage = icon
         let bundleIcon = URL(fileURLWithPath: appPath)
             .appendingPathComponent("Contents")
             .appendingPathComponent("Resources")
             .appendingPathComponent("AppIcon.icns")
-        _ = IcnsWriter.write(icon, to: bundleIcon)
-        let workspace = NSWorkspace.shared
-        // Finder caches the bundle icon; the custom-icon record is what makes it refresh after the
-        // app quits. It leaves an `Icon\r` behind, so a manual re-sign of the *installed* app must
-        // clear that first — `build.sh` signs the freshly assembled bundle, so the normal flow is
-        // unaffected.
-        workspace.setIcon(icon, forFile: appPath, options: [])
-        workspace.noteFileSystemChanged(appPath)
+        // `NSWorkspace.setIcon` used to accompany the write so Finder would refresh. Its
+        // custom-icon record is `com.apple.FinderInfo` on the bundle, which `codesign` refuses to
+        // sign at all — every colour change then left the installed app unsealable. The bundled
+        // icns is the icon Finder reads on its own, so the timestamp below is what is needed.
+        if IcnsWriter.writeIfChanged(icon, to: bundleIcon) {
+            AppBundleSeal.schedule(for: appPath)
+        }
+        markBundleChanged(appPath)
+    }
+
+    /// Marks the bundle as freshly changed, which is what makes the system re-read its icon.
+    ///
+    /// LaunchServices and IconServices validate the icon record they keep for a bundle against the
+    /// bundle's own modification date, not against `Contents/Resources/AppIcon.icns` three levels
+    /// down. Rewriting that file therefore left the record valid and Finder and the Dock kept drawing
+    /// the icon they had cached, so a chosen colour looked unsaved after quitting while the file on
+    /// disk already carried it. Writing the icon is only half of an update; this is the other half.
+    ///
+    /// The icon is newer than the bundle's mark exactly when it changed since the bundle was last
+    /// marked, so steady-state launches stay silent instead of re-indexing the app every time.
+    private static func markBundleChanged(_ appPath: String) {
+        let manager = FileManager.default
+        let bundle = URL(fileURLWithPath: appPath)
+        let icon = bundle.appendingPathComponent("Contents/Resources/AppIcon.icns")
+        let marked = (try? manager.attributesOfItem(atPath: bundle.path))?[.modificationDate] as? Date
+        let written = (try? manager.attributesOfItem(atPath: icon.path))?[.modificationDate] as? Date
+        if let marked, let written, written <= marked { return }
+        try? manager.setAttributes([.modificationDate: written ?? Date()], ofItemAtPath: appPath)
+        NSWorkspace.shared.noteFileSystemChanged(appPath)
     }
 
     /// Re-resolves the saved preset without writing the bundle form of it.

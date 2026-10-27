@@ -12,9 +12,11 @@ final class Preferences {
         static let pageZoom = "pageZoom"
         static let titleBarMode = "titleBarMode"
         static let splashBaseColor = "splashBaseColor"
+        static let themeSource = "themeSource"
         static let appIconPreset = "appIconPreset"
         static let appIconFollowsTheme = "appIconFollowsTheme"
-        static let appIconResolvedVariant = "appIconResolvedVariant"
+        static let appIconFollowMode = "appIconFollowMode"
+        static let appIconThemeVariant = "appIconThemeVariant"
         static let appIconTemplateColor = "appIconTemplateColor"
         static let appIconTemplateFollowsTheme = "appIconTemplateFollowsTheme"
         static let customAppIconPath = "customAppIconPath"
@@ -31,9 +33,11 @@ final class Preferences {
             Key.pageZoom: 1.0,
             Key.titleBarMode: TitleBarMode.lightsOnly.rawValue,
             Key.splashBaseColor: "",
+            Key.themeSource: "",
             Key.appIconPreset: "orca",
             Key.appIconFollowsTheme: false,
-            Key.appIconResolvedVariant: "",
+            Key.appIconFollowMode: "",
+            Key.appIconThemeVariant: "",
             Key.appIconTemplateColor: "",
             Key.appIconTemplateFollowsTheme: false,
             Key.customAppIconPath: "",
@@ -83,31 +87,54 @@ final class Preferences {
         set { defaults.set(newValue, forKey: Key.splashBaseColor) }
     }
 
+    /// Last page theme source reported by the theme bridge: `light`, `dark` or `system`.
+    ///
+    /// Used to reject the system-scheme palette a host can report for a frame before its saved
+    /// light/dark choice lands; an empty value falls back to the persisted base's own lightness.
+    var themeSource: String {
+        get { defaults.string(forKey: Key.themeSource) ?? "" }
+        set { defaults.set(newValue, forKey: Key.themeSource) }
+    }
+
     /// Selected Dock-icon preset; `"orca"` by default, others resolved through `AppIcon`.
     var appIconPreset: String {
         get { defaults.string(forKey: Key.appIconPreset) ?? "orca" }
         set { defaults.set(newValue, forKey: Key.appIconPreset) }
     }
 
-    /// Whether the chosen preset tracks the page theme's light/dark variant.
+    /// Whether the chosen preset tracks the Mac's light/dark appearance.
+    ///
+    /// Legacy flag: the settings row now writes `appIconFollowMode`. It is still read once to
+    /// migrate an existing choice.
     var appIconFollowsTheme: Bool {
         get { defaults.bool(forKey: Key.appIconFollowsTheme) }
         set { defaults.set(newValue, forKey: Key.appIconFollowsTheme) }
     }
 
-    /// Last variant the theme resolved for a themed preset, so the preset holds across reloads.
-    var appIconResolvedVariant: String {
-        get { defaults.string(forKey: Key.appIconResolvedVariant) ?? "" }
-        set { defaults.set(newValue, forKey: Key.appIconResolvedVariant) }
+    /// Icon follow mode: `none`, `theme` or `system`. Empty before the first choice; `AppIcon`
+    /// migrates the legacy boolean switches in that case.
+    var appIconFollowMode: String {
+        get { defaults.string(forKey: Key.appIconFollowMode) ?? "" }
+        set { defaults.set(newValue, forKey: Key.appIconFollowMode) }
     }
 
-    /// Hex colour the `template` preset fills behind the artwork; empty uses the theme colour.
+    /// Last page-theme variant reported by the icon bridge (`dawn` / `main` / `moon`), used by the
+    /// `theme` follow mode.
+    var appIconThemeVariant: String {
+        get { defaults.string(forKey: Key.appIconThemeVariant) ?? "" }
+        set { defaults.set(newValue, forKey: Key.appIconThemeVariant) }
+    }
+
+    /// Hex colour the `template` preset fills behind the artwork; empty uses the icon's dark plane.
     var appIconTemplateColor: String {
         get { defaults.string(forKey: Key.appIconTemplateColor) ?? "" }
         set { defaults.set(newValue, forKey: Key.appIconTemplateColor) }
     }
 
-    /// Whether the template preset tracks the page theme colour instead of the fixed one above.
+    /// Whether the template preset follows the Mac's light/dark appearance instead of the fixed
+    /// colour above.
+    ///
+    /// Legacy flag: the settings row now writes `appIconFollowMode`; read once for migration.
     var appIconTemplateFollowsTheme: Bool {
         get { defaults.bool(forKey: Key.appIconTemplateFollowsTheme) }
         set { defaults.set(newValue, forKey: Key.appIconTemplateFollowsTheme) }
