@@ -1,27 +1,39 @@
 // Orca developer tools — panel front end.
 //
 // Everything shown here comes from the page's agent: live events it pushes, or answers to the
-// commands this file asks for. The panel keeps no independent copy of the app's state, so a reload
-// simply starts from an empty back log again.
+// commands this file asks for. Cookies and site data are the exception — they come from the shell,
+// because they live in the web view's data store rather than in the document. The panel keeps no
+// independent copy of the app's state, so a reload simply starts from an empty back log again.
 (() => {
   'use strict';
 
   const channelName = 'devToolsPanel';
   const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[channelName];
   const CONSOLE_VISIBLE_LIMIT = 800;
+  const PREF_KEY = 'orca.devtools.prefs';
+
+  /// In-flight tree build, so concurrent callers share one build instead of racing.
+  let pendingTree = null;
 
   const state = {
     tab: 'console',
     filter: '',
+    level: 'all',
+    kind: 'all',
+    timestamps: false,
+    preserve: false,
     open: false,
     pageReady: false,
+    picking: false,
     consoleEntries: [],
+    seenConsole: new Set(),
     requests: new Map(),
+    seenRequests: new Set(),
     selectedRequest: null,
+    sort: null,
     selectedPath: null,
-    expandedPaths: new Set(),
     lastHighlight: null,
-    storage: { area: 'local', rows: [], origin: '', selected: null, editing: null },
+    storage: { area: 'local', rows: [], cookies: [], origin: '', selected: null, editing: null },
   };
 
   // MARK: - Small helpers
@@ -65,6 +77,30 @@
     }
   }
 
+  function copyText(text) {
+    if (!handler) return;
+    handler.postMessage({ kind: 'copy', text: String(text) });
+    setStatus('Copied to the clipboard', true);
+  }
+
+  // MARK: - Remembered switches
+
+  function loadPrefs() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(PREF_KEY) || '{}');
+      state.timestamps = !!stored.timestamps;
+      state.preserve = !!stored.preserve;
+    } catch (error) {
+      // A panel without storage still works; the switches just start off.
+    }
+  }
+
+  function savePrefs() {
+    try {
+      localStorage.setItem(PREF_KEY, JSON.stringify({ timestamps: state.timestamps, preserve: state.preserve }));
+    } catch (error) {}
+  }
+
   // MARK: - Theme and visibility
 
   function applyTheme(theme) {
@@ -84,10 +120,18 @@
 
   async function onPageReady(ready) {
     state.pageReady = ready;
-    setStatus(ready ? 'Page agent connected' : 'Waiting for the page…', ready);
-    if (ready && state.open) {
-      await refreshAll();
+    if (!ready) {
+      if (state.preserve) {
+        appendConsole({ id: 'nav' + Date.now(), level: 'navigation', args: [{ kind: 'string', text: 'navigation' }] });
+      } else {
+        clearConsole();
+        clearNetwork();
+      }
+      setStatus('Waiting for the page…', false);
+      return;
     }
+    setStatus('Page agent connected', true);
+    if (state.open) await refreshAll();
   }
 
   // MARK: - Tabs
@@ -119,10 +163,26 @@
 
   // MARK: - Console
 
+  function levelMatches(level) {
+    if (state.level === 'all' || level === 'navigation') return true;
+    if (state.level === 'error') return level === 'error';
+    if (state.level === 'warn') return level === 'warn';
+    return ['log', 'info', 'debug', 'trace', 'input', 'result'].includes(level);
+  }
+
   function consoleRow(entry) {
     const row = el('div', 'entry');
     row.dataset.level = entry.level || 'log';
     row.dataset.id = entry.id;
+
+    if (entry.level === 'navigation') {
+      row.appendChild(el('span', null, 'navigation'));
+      return row;
+    }
+
+    if (state.timestamps && entry.time) {
+      row.appendChild(el('span', 'time', formatTime(entry.time)));
+    }
     row.appendChild(el('span', 'level', entry.level === 'result' ? 'return' : entry.level || 'log'));
 
     const values = el('div', 'values');
@@ -202,6 +262,10 @@
   }
 
   function appendConsole(entry) {
+    if (!entry) return;
+    if (entry.id && state.seenConsole.has(entry.id)) return;
+    if (entry.id) state.seenConsole.add(entry.id);
+
     state.consoleEntries.push(entry);
     if (state.consoleEntries.length > CONSOLE_VISIBLE_LIMIT) {
       state.consoleEntries.shift();
@@ -216,7 +280,7 @@
       log.firstElementChild.remove();
     }
     if (pinned) log.scrollTop = log.scrollHeight;
-    updateCount('console', state.consoleEntries.length);
+    updateCounts();
   }
 
   function renderConsole() {
@@ -228,22 +292,35 @@
       log.appendChild(row);
     }
     log.scrollTop = log.scrollHeight;
-    updateCount('console', state.consoleEntries.length);
+    updateCounts();
+  }
+
+  function clearConsole() {
+    state.consoleEntries = [];
+    state.seenConsole.clear();
+    renderConsole();
   }
 
   async function refreshConsole() {
     const answer = await call('console.backlog');
     if (!answer || !answer.entries) return;
-    state.consoleEntries = answer.entries.slice();
-    renderConsole();
+    // Appended rather than replacing: with "preserve log" on, the entries already on screen come
+    // from an earlier document and are not in this back log at all.
+    for (const entry of answer.entries) {
+      appendConsole(entry);
+    }
   }
 
   async function evaluate(code) {
-    const trimmed = code.trim();
+    const trimmed = String(code || '').trim();
     if (!trimmed) return;
     appendConsole({ id: 'in' + Date.now(), level: 'input', args: [{ kind: 'string', text: trimmed }] });
     const answer = await call('console.eval', { code: trimmed });
     if (!answer) return;
+    if (answer.cleared) {
+      // `clear()` ran inside the page: the ring there is empty, so the panel's copy has to follow.
+      clearConsole();
+    }
     if (answer.ok) {
       appendConsole({ id: 'out' + Date.now(), level: 'result', args: [answer.value] });
       return;
@@ -260,6 +337,7 @@
   function networkRow(record) {
     const row = el('div', 'network-row');
     row.dataset.id = record.id;
+    row.dataset.kind = record.kind || '';
 
     const url = el('span', 'url');
     try {
@@ -287,46 +365,45 @@
     if (!record || !record.id) return;
     const merged = Object.assign({}, state.requests.get(record.id) || {}, record);
     state.requests.set(record.id, merged);
+    state.seenRequests.add(record.id);
 
     const rows = role('network-rows');
+    const fresh = networkRow(merged);
+    applyRowFilter(fresh);
     const existing = rows.querySelector('[data-id="' + record.id + '"]');
     if (existing) {
-      const fresh = networkRow(merged);
-      applyRowFilter(fresh);
       existing.replaceWith(fresh);
     } else {
-      const fresh = networkRow(merged);
-      applyRowFilter(fresh);
       rows.appendChild(fresh);
       const list = rows.parentElement;
       const pinned = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
-      if (pinned) list.scrollTop = list.scrollHeight;
+      if (pinned && !state.sort) list.scrollTop = list.scrollHeight;
     }
-    updateCount('network', state.requests.size);
+    updateCounts();
+    if (state.sort) applySort();
     if (state.selectedRequest === record.id) {
       renderRequestDetail(merged);
     }
   }
 
+  function clearNetwork() {
+    state.requests.clear();
+    state.seenRequests.clear();
+    state.selectedRequest = null;
+    role('network-rows').textContent = '';
+    const detail = role('network-detail');
+    detail.textContent = '';
+    detail.appendChild(el('p', 'hint', 'Select a request to see its headers and body.'));
+    updateCounts();
+  }
+
   async function refreshNetwork() {
     const answer = await call('network.backlog');
     if (!answer || !answer.records) return;
-    state.requests.clear();
-    role('network-rows').textContent = '';
+    // Same reasoning as the console: records the panel already shows are updated in place by id,
+    // the rest are added, so a re-read never duplicates a row.
     for (const record of answer.records) {
-      state.requests.set(record.id, record);
-      const row = networkRow(record);
-      applyRowFilter(row);
-      role('network-rows').appendChild(row);
-    }
-    updateCount('network', state.requests.size);
-    if (state.selectedRequest && state.requests.has(state.selectedRequest)) {
-      renderRequestDetail(state.requests.get(state.selectedRequest));
-    } else {
-      state.selectedRequest = null;
-      const detail = role('network-detail');
-      detail.textContent = '';
-      detail.appendChild(el('p', 'hint', 'Select a request to see its headers and body.'));
+      upsertRequest(record);
     }
   }
 
@@ -339,9 +416,60 @@
     if (record) renderRequestDetail(record);
   }
 
+  function sortRecords(records, sort) {
+    const direction = sort.ascending ? 1 : -1;
+    return records.slice().sort((left, right) => {
+      const a = left[sort.key];
+      const b = right[sort.key];
+      if (typeof a === 'string' || typeof b === 'string') {
+        return String(a || '').localeCompare(String(b || '')) * direction;
+      }
+      return ((a || 0) - (b || 0)) * direction;
+    });
+  }
+
+  function applySort() {
+    const rows = role('network-rows');
+    for (const record of sortRecords(Array.from(state.requests.values()), state.sort)) {
+      const row = rows.querySelector('[data-id="' + record.id + '"]');
+      if (row) rows.appendChild(row);
+    }
+    for (const cell of document.querySelectorAll('.network-head span[data-sort]')) {
+      const active = cell.dataset.sort === state.sort.key;
+      cell.dataset.sorted = active ? 'true' : 'false';
+      cell.textContent = cell.textContent.replace(/ [▲▼]$/, '') +
+        (active ? (state.sort.ascending ? ' ▲' : ' ▼') : '');
+    }
+  }
+
+  function curlFor(record) {
+    const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
+    const parts = ['curl', quote(record.url)];
+    if (record.method && record.method !== 'GET') {
+      parts.push('-X', record.method);
+    }
+    for (const [name, value] of Object.entries(record.requestHeaders || {})) {
+      parts.push('-H', quote(name + ': ' + value));
+    }
+    if (record.requestBody) {
+      parts.push('--data-raw', quote(record.requestBody));
+    }
+    return parts.join(' \\\n  ');
+  }
+
   function renderRequestDetail(record) {
     const detail = role('network-detail');
     detail.textContent = '';
+
+    const actions = el('div', 'detail-actions');
+    const action = (label, body) => {
+      const button = el('button', 'ghost', label);
+      button.addEventListener('click', body);
+      actions.appendChild(button);
+    };
+    action('Copy URL', () => copyText(record.url));
+    action('Copy as cURL', () => copyText(curlFor(record)));
+    detail.appendChild(actions);
 
     detail.appendChild(el('h4', null, 'General'));
     const general = el('div', 'kv');
@@ -435,7 +563,11 @@
     if (item.children) {
       caret.addEventListener('click', (event) => {
         event.stopPropagation();
-        toggleDom(caret, container, item);
+        if (container.dataset.loaded === 'true') {
+          expandRow(row, container, container.hidden);
+        } else {
+          loadChildren(container, item.path).then(() => expandRow(row, container, true));
+        }
       });
     }
     row.addEventListener('click', () => selectElement(item.path));
@@ -443,32 +575,43 @@
     return fragment;
   }
 
-  async function toggleDom(caret, container, item) {
-    const expanded = caret.dataset.open === 'true';
-    if (expanded) {
-      caret.dataset.open = 'false';
-      caret.textContent = '▸';
-      container.hidden = true;
+  async function loadChildren(container, path) {
+    if (container.dataset.loaded === 'true') return;
+    const answer = await call('dom.children', { path: path });
+    container.textContent = '';
+    container.dataset.loaded = 'true';
+    if (!answer || answer.error) {
+      container.appendChild(el('div', 'node', answer && answer.error ? answer.error : 'Not available'));
       return;
     }
-    caret.dataset.open = 'true';
-    caret.textContent = '▾';
-    if (!container.dataset.loaded) {
-      const answer = await call('dom.children', { path: item.path });
-      container.dataset.loaded = 'true';
-      container.textContent = '';
-      if (!answer || answer.error) {
-        container.appendChild(el('div', 'node', answer && answer.error ? answer.error : 'Not available'));
-      } else {
-        for (const child of answer.children || []) {
-          container.appendChild(domRow(child, item.path.length + 1));
-        }
-      }
+    for (const child of answer.children || []) {
+      container.appendChild(domRow(child, (path || []).length + 1));
     }
-    container.hidden = false;
   }
 
-  async function loadDomTree() {
+  /// Opens or closes one branch and keeps its caret in step with the container.
+  function expandRow(row, container, open) {
+    container.hidden = !open;
+    const caret = row.firstElementChild;
+    if (caret && caret.classList.contains('toggle')) {
+      caret.dataset.open = open ? 'true' : 'false';
+      caret.textContent = open ? '▾' : '▸';
+    }
+  }
+
+  /// Serialised: a tab switch and a pick can both ask for the tree in the same turn, and two
+  /// concurrent builds used to append two roots.
+  function loadDomTree() {
+    if (pendingTree) return pendingTree;
+    pendingTree = buildDomTree().then(() => {
+      pendingTree = null;
+    }, () => {
+      pendingTree = null;
+    });
+    return pendingTree;
+  }
+
+  async function buildDomTree() {
     const tree = role('dom-tree');
     tree.textContent = '';
     const answer = await call('dom.children', { path: [] });
@@ -478,24 +621,44 @@
     }
     // The root row is <html>; its children are what the agent answered with.
     const root = el('div', 'node');
+    root.dataset.path = '[]';
     const caret = el('span', 'toggle', '▾');
     root.appendChild(caret);
     root.appendChild(el('span', 'tag', '<html>'));
     const container = el('div', 'dom-children');
+    container.dataset.loaded = 'true';
     for (const child of answer.children || []) {
       container.appendChild(domRow(child, 1));
     }
     tree.appendChild(root);
     tree.appendChild(container);
-    root.dataset.path = '[]';
     root.addEventListener('click', () => selectElement([]));
     root.addEventListener('mouseenter', () => highlight([]));
     caret.addEventListener('click', (event) => {
       event.stopPropagation();
-      const hidden = !container.hidden;
-      container.hidden = hidden;
-      caret.textContent = hidden ? '▸' : '▾';
+      expandRow(root, container, container.hidden);
     });
+  }
+
+  /// Opens the tree down to `path` and selects it — what the element picker needs to land on a row.
+  async function revealPath(path) {
+    const tree = role('dom-tree');
+    if (!tree.firstElementChild) await loadDomTree();
+    let container = tree.querySelector(':scope > .dom-children');
+    if (!container) return;
+    let prefix = [];
+    for (const index of path) {
+      await loadChildren(container, prefix);
+      prefix = prefix.concat([index]);
+      const row = container.querySelector(':scope > .node[data-path="' + JSON.stringify(prefix) + '"]');
+      if (!row) return;
+      const childContainer = row.nextElementSibling;
+      if (!childContainer) return;
+      expandRow(row, childContainer, true);
+      container = childContainer;
+    }
+    const target = tree.querySelector(':scope .node[data-path="' + JSON.stringify(path) + '"]');
+    if (target) target.click();
   }
 
   async function selectElement(path) {
@@ -504,6 +667,7 @@
       row.dataset.selected = row.dataset.path === JSON.stringify(path) ? 'true' : 'false';
     }
     highlight(path);
+    call('dom.select', { path: path });
 
     const detail = role('dom-detail');
     detail.textContent = '';
@@ -534,26 +698,26 @@
 
     if (styles.attributes && styles.attributes.length) {
       detail.appendChild(el('h4', null, 'Attributes'));
-      const box2 = el('div', 'kv');
+      const attributeBox = el('div', 'kv');
       for (const [key, value] of styles.attributes) {
         const line = el('div');
         line.appendChild(el('span', 'k', key));
         line.appendChild(el('span', 'v', value));
-        box2.appendChild(line);
+        attributeBox.appendChild(line);
       }
-      detail.appendChild(box2);
+      detail.appendChild(attributeBox);
     }
 
     for (const group of styles.groups || []) {
       detail.appendChild(el('h4', null, group.title));
-      const box3 = el('div', 'kv');
+      const groupBox = el('div', 'kv');
       for (const [property, value] of group.rows) {
         const line = el('div');
         line.appendChild(el('span', 'k', property));
         line.appendChild(el('span', 'v', value));
-        box3.appendChild(line);
+        groupBox.appendChild(line);
       }
-      detail.appendChild(box3);
+      detail.appendChild(groupBox);
     }
 
     if (styles.rules && styles.rules.length) {
@@ -585,9 +749,17 @@
     call('dom.highlight', { path: path });
   }
 
+  async function onPicked(payload) {
+    state.picking = false;
+    role('elements-note').textContent = '';
+    selectTab('elements');
+    await loadDomTree();
+    await revealPath((payload && payload.path) || []);
+  }
+
   // MARK: - Storage
 
-  function renderStoreRows() {
+  function renderLocalRows() {
     const rows = role('store-rows');
     rows.textContent = '';
     role('store-origin').textContent = state.storage.origin || '';
@@ -606,13 +778,53 @@
     }
   }
 
+  function renderCookieRows() {
+    const rows = role('store-rows');
+    rows.textContent = '';
+    role('store-origin').textContent = state.storage.origin || '';
+    if (!state.storage.cookies.length) {
+      rows.appendChild(el('p', 'hint', 'No cookies in this data store.'));
+      return;
+    }
+    for (const cookie of state.storage.cookies) {
+      const row = el('div', 'store-row cookie');
+      row.appendChild(el('span', 'key', cookie.name));
+      row.appendChild(el('span', 'value', String(cookie.value).slice(0, 160)));
+
+      const trailing = el('span', 'row-meta');
+      const flags = [];
+      if (cookie.domain) flags.push(cookie.domain);
+      if (cookie.httpOnly) flags.push('HttpOnly');
+      if (cookie.secure) flags.push('Secure');
+      trailing.appendChild(document.createTextNode(flags.join(' · ')));
+
+      const remove = el('button', 'row-action', '✕');
+      remove.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        const answer = await call('cookies.delete', { name: cookie.name, domain: cookie.domain, path: cookie.path });
+        if (answer && answer.error) setStatus(answer.error, false);
+        await loadStorage();
+      });
+      trailing.appendChild(remove);
+      row.appendChild(trailing);
+      rows.appendChild(row);
+    }
+  }
+
   async function loadStorage() {
+    if (state.storage.area === 'cookies') {
+      const answer = await call('cookies.list');
+      if (answer && answer.error) setStatus(answer.error, false);
+      state.storage.cookies = (answer && answer.rows) || [];
+      renderCookieRows();
+      return;
+    }
     const answer = await call('storage.list');
     if (!answer) return;
     const area = answer[state.storage.area] || { rows: [] };
     state.storage.rows = area.rows || [];
     state.storage.origin = answer.origin || '';
-    renderStoreRows();
+    renderLocalRows();
   }
 
   function openEditor(key, value) {
@@ -666,39 +878,93 @@
     await loadStorage();
   }
 
-  // MARK: - Filtering
-
-  function applyRowFilter(row) {
-    if (!state.filter) {
-      row.classList.remove('hidden');
+  /// Two-step confirmation for the actions that cannot be undone, without a modal dialog.
+  function arm(button, label, action) {
+    if (button.dataset.armed === 'true') {
+      button.dataset.armed = 'false';
+      button.textContent = label;
+      action();
       return;
     }
-    const matches = row.textContent.toLowerCase().includes(state.filter);
-    row.classList.toggle('hidden', !matches);
+    button.dataset.armed = 'true';
+    button.textContent = 'Sure?';
+    setTimeout(() => {
+      if (button.dataset.armed !== 'true') return;
+      button.dataset.armed = 'false';
+      button.textContent = label;
+    }, 3000);
+  }
+
+  async function clearCurrentStore() {
+    if (state.storage.area === 'cookies') {
+      const answer = await call('cookies.clear');
+      if (answer && answer.error) setStatus(answer.error, false);
+      await loadStorage();
+      return;
+    }
+    const answer = await call('storage.clear', { area: state.storage.area });
+    if (!answer || !answer.ok) {
+      setStatus((answer && answer.error) || 'Could not clear the store', false);
+      return;
+    }
+    state.storage.selected = null;
+    closeEditor();
+    await loadStorage();
+  }
+
+  // MARK: - Filtering
+
+  function rowMatches(row) {
+    if (row.dataset.level && !levelMatches(row.dataset.level)) return false;
+    if (row.dataset.kind && state.kind !== 'all' && row.dataset.kind !== state.kind) return false;
+    if (state.filter && !row.textContent.toLowerCase().includes(state.filter)) return false;
+    return true;
+  }
+
+  function applyRowFilter(row) {
+    row.classList.toggle('hidden', !rowMatches(row));
   }
 
   function applyFilter() {
-    const filter = state.filter;
-    if (document.querySelector('[data-page="console"]').dataset.active === 'true') {
+    const active = document.querySelector('.page[data-active="true"]');
+    if (!active) return;
+    const page = active.dataset.page;
+    if (page === 'console') {
       for (const row of document.querySelectorAll('.entry')) applyRowFilter(row);
     }
-    if (document.querySelector('[data-page="network"]').dataset.active === 'true') {
+    if (page === 'network') {
       for (const row of document.querySelectorAll('.network-row')) applyRowFilter(row);
     }
-    if (document.querySelector('[data-page="elements"]').dataset.active === 'true') {
+    if (page === 'elements') {
       for (const row of document.querySelectorAll('.node')) {
-        const matches = !filter || row.textContent.toLowerCase().includes(filter);
+        const matches = !state.filter || row.textContent.toLowerCase().includes(state.filter);
         row.dataset.hidden = matches ? 'false' : 'true';
       }
     }
-    if (document.querySelector('[data-page="storage"]').dataset.active === 'true') {
+    if (page === 'storage') {
       for (const row of document.querySelectorAll('.store-row')) applyRowFilter(row);
     }
   }
 
-  function updateCount(name, count) {
-    const badge = document.querySelector('[data-count="' + name + '"]');
-    if (badge) badge.textContent = String(count);
+  function updateCounts() {
+    const totals = { console: state.consoleEntries.length, network: state.requests.size };
+    for (const [name, value] of Object.entries(totals)) {
+      const badge = document.querySelector('[data-count="' + name + '"]');
+      if (badge) badge.textContent = String(value);
+    }
+
+    let errors = 0;
+    let warnings = 0;
+    for (const entry of state.consoleEntries) {
+      if (entry.level === 'error') errors += 1;
+      if (entry.level === 'warn') warnings += 1;
+    }
+    for (const [name, value] of Object.entries({ error: errors, warn: warnings })) {
+      const badge = document.querySelector('[data-level-count="' + name + '"]');
+      if (!badge) continue;
+      badge.textContent = String(value);
+      badge.parentElement.dataset.count = String(value);
+    }
   }
 
   // MARK: - Wiring
@@ -713,26 +979,70 @@
       applyFilter();
     });
 
+    for (const chip of document.querySelectorAll('.chip[data-level]')) {
+      chip.addEventListener('click', () => {
+        state.level = chip.dataset.level;
+        for (const other of document.querySelectorAll('.chip[data-level]')) {
+          other.dataset.selected = other === chip ? 'true' : 'false';
+        }
+        applyFilter();
+      });
+    }
+
+    for (const chip of document.querySelectorAll('.chip[data-kind]')) {
+      chip.addEventListener('click', () => {
+        state.kind = chip.dataset.kind;
+        for (const other of document.querySelectorAll('.chip[data-kind]')) {
+          other.dataset.selected = other === chip ? 'true' : 'false';
+        }
+        applyFilter();
+      });
+    }
+
+    for (const chip of document.querySelectorAll('.chip[data-toggle]')) {
+      const name = chip.dataset.toggle;
+      chip.dataset.selected = state[name] ? 'true' : 'false';
+      chip.addEventListener('click', () => {
+        state[name] = !state[name];
+        chip.dataset.selected = state[name] ? 'true' : 'false';
+        savePrefs();
+        if (name === 'timestamps') renderConsole();
+      });
+    }
+
+    for (const cell of document.querySelectorAll('.network-head span[data-sort]')) {
+      cell.addEventListener('click', () => {
+        const key = cell.dataset.sort;
+        const ascending = state.sort && state.sort.key === key ? !state.sort.ascending : true;
+        state.sort = { key: key, ascending: ascending };
+        applySort();
+      });
+    }
+
     document.querySelector('[data-action="clear"]').addEventListener('click', async () => {
       if (state.tab === 'console') {
         await call('console.clear');
-        state.consoleEntries = [];
-        renderConsole();
+        clearConsole();
       } else if (state.tab === 'network') {
         await call('network.clear');
-        state.requests.clear();
-        state.selectedRequest = null;
-        role('network-rows').textContent = '';
-        role('network-detail').textContent = '';
-        role('network-detail').appendChild(el('p', 'hint', 'Select a request to see its headers and body.'));
-        updateCount('network', 0);
+        clearNetwork();
       } else if (state.tab === 'storage') {
-        await clearStorage();
+        arm(document.querySelector('[data-action="storage-clear"]'), 'Clear all', clearCurrentStore);
       }
     });
 
     document.querySelector('[data-action="close"]').addEventListener('click', () => {
       handler.postMessage({ kind: 'panel', name: 'close' });
+    });
+
+    document.querySelector('[data-action="pick"]').addEventListener('click', () => {
+      state.picking = true;
+      role('elements-note').textContent = 'Pick an element on the page — Escape cancels';
+      call('dom.pick.start');
+    });
+
+    document.querySelector('[data-action="refresh-dom"]').addEventListener('click', () => {
+      loadDomTree();
     });
 
     const form = role('console-form');
@@ -769,6 +1079,7 @@
         for (const other of document.querySelectorAll('.areas button')) {
           other.dataset.selected = other === button ? 'true' : 'false';
         }
+        document.querySelector('[data-action="storage-add"]').hidden = state.storage.area === 'cookies';
         closeEditor();
         await loadStorage();
       });
@@ -776,7 +1087,20 @@
 
     document.querySelector('[data-action="storage-add"]').addEventListener('click', () => openEditor('', ''));
     document.querySelector('[data-action="storage-reload"]').addEventListener('click', loadStorage);
-    document.querySelector('[data-action="storage-clear"]').addEventListener('click', clearStorage);
+    document.querySelector('[data-action="storage-clear"]').addEventListener('click', (event) => {
+      arm(event.currentTarget, 'Clear all', clearCurrentStore);
+    });
+    document.querySelector('[data-action="site-clear"]').addEventListener('click', (event) => {
+      arm(event.currentTarget, 'Clear site data…', async () => {
+        const answer = await call('site.clear');
+        if (!answer || !answer.ok) {
+          setStatus((answer && answer.error) || 'Could not clear the site data', false);
+          return;
+        }
+        // The shell reloads the page so it sees the same (now empty) state the panel shows.
+        setStatus('Site data cleared, page reloading', true);
+      });
+    });
     document.querySelector('[data-action="store-save"]').addEventListener('click', saveStorage);
     document.querySelector('[data-action="store-delete"]').addEventListener('click', deleteStorage);
     document.querySelector('[data-action="store-cancel"]').addEventListener('click', closeEditor);
@@ -791,32 +1115,7 @@
       }
     });
 
-    document.addEventListener('mouseleave', () => highlight(null));
     role('dom-tree').addEventListener('mouseleave', () => highlight(null));
-  }
-
-  let clearArmed = false;
-  async function clearStorage() {
-    const button = document.querySelector('[data-action="storage-clear"]');
-    if (!clearArmed) {
-      clearArmed = true;
-      button.textContent = 'Sure?';
-      setTimeout(() => {
-        clearArmed = false;
-        button.textContent = 'Clear all';
-      }, 3000);
-      return;
-    }
-    clearArmed = false;
-    button.textContent = 'Clear all';
-    const answer = await call('storage.clear', { area: state.storage.area });
-    if (!answer || !answer.ok) {
-      setStatus((answer && answer.error) || 'Could not clear the store', false);
-      return;
-    }
-    state.storage.selected = null;
-    closeEditor();
-    await loadStorage();
   }
 
   // MARK: - Shell messages
@@ -833,11 +1132,21 @@
       case 'page':
         onPageReady(!!payload.ready);
         break;
+      case 'pick':
+        selectTab('elements');
+        role('elements-note').textContent = 'Pick an element on the page — Escape cancels';
+        break;
       case 'event':
         if (payload.channel === 'console') {
           appendConsole(payload.payload);
         } else if (payload.channel === 'network') {
           upsertRequest(payload.payload && payload.payload.record);
+        } else if (payload.channel === 'picked') {
+          onPicked(payload.payload);
+        } else if (payload.channel === 'pickCancelled') {
+          state.picking = false;
+          role('elements-note').textContent = '';
+          setStatus('Element picking cancelled', true);
         }
         break;
       default:
@@ -848,9 +1157,10 @@
   window.__orcaDevtoolsPanel = { receive: receive };
 
   async function init() {
+    loadPrefs();
     wire();
     applyTheme({ appearance: 'dark' });
-    role('meta').textContent = 'F12 toggles the panel';
+    role('meta').textContent = 'F12 toggles · ⌘⇧C picks an element';
     if (!handler) {
       setStatus('Orca bridge is not available', false);
       return;

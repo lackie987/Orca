@@ -22,4 +22,16 @@ extension WebPageController: DevToolsPageBridge {
             }
         }
     }
+
+    var devToolsDataStore: WKWebsiteDataStore {
+        webView.configuration.websiteDataStore
+    }
+
+    var devToolsOrigin: URL? {
+        accessURL
+    }
+
+    func devToolsReload() {
+        reload()
+    }
 }

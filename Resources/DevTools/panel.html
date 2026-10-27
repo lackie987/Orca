@@ -17,25 +17,48 @@
   <div class="tools">
     <input class="filter" type="search" placeholder="Filter" spellcheck="false" autocomplete="off" data-role="filter">
     <button class="ghost" data-action="clear">Clear</button>
-    <button class="ghost" data-action="close" title="Close (F12)">✕</button>
+    <button class="ghost" data-action="close" aria-label="Close panel">✕</button>
   </div>
 </header>
 
 <main>
   <section class="page" data-page="console" data-active="true">
+    <div class="subbar">
+      <button class="chip" data-level="all" data-selected="true">All</button>
+      <button class="chip" data-level="error">Errors<span class="chip-count" data-level-count="error">0</span></button>
+      <button class="chip" data-level="warn">Warnings<span class="chip-count" data-level-count="warn">0</span></button>
+      <button class="chip" data-level="info">Info</button>
+      <span class="sep"></span>
+      <button class="chip" data-toggle="timestamps">Timestamps</button>
+      <button class="chip" data-toggle="preserve">Preserve log</button>
+    </div>
     <div class="console">
       <div class="console-log" data-role="console-log"></div>
       <form class="console-input" data-role="console-form">
         <span class="prompt">›</span>
-        <input type="text" spellcheck="false" autocomplete="off" placeholder="Evaluate in the page — promises resolve, objects expand" data-role="console-input">
+        <input type="text" spellcheck="false" autocomplete="off" placeholder="Evaluate in the page — $0, $$(), copy(), await" data-role="console-input">
       </form>
     </div>
   </section>
 
   <section class="page" data-page="network">
+    <div class="subbar">
+      <button class="chip" data-kind="all" data-selected="true">All</button>
+      <button class="chip" data-kind="fetch">Fetch</button>
+      <button class="chip" data-kind="xhr">XHR</button>
+      <button class="chip" data-kind="websocket">WS</button>
+      <button class="chip" data-kind="resource">Resources</button>
+      <span class="sep"></span>
+      <button class="chip" data-toggle="preserve">Preserve log</button>
+    </div>
     <div class="network">
-      <div class="network-head">
-        <span>Name</span><span>Method</span><span>Status</span><span>Kind</span><span>Size</span><span>Time</span>
+      <div class="network-head" data-role="network-head">
+        <span data-sort="url">Name</span>
+        <span data-sort="method">Method</span>
+        <span data-sort="status">Status</span>
+        <span data-sort="kind">Kind</span>
+        <span data-sort="size">Size</span>
+        <span data-sort="duration">Time</span>
       </div>
       <div class="network-body">
         <div class="network-list" data-role="network-list">
@@ -49,6 +72,12 @@
   </section>
 
   <section class="page" data-page="elements">
+    <div class="subbar">
+      <button class="chip" data-action="pick">Pick element ⌘⇧C</button>
+      <button class="chip" data-action="refresh-dom">Refresh</button>
+      <span class="sep"></span>
+      <span class="subbar-note" data-role="elements-note"></span>
+    </div>
     <div class="elements">
       <div class="tree" data-role="dom-tree"></div>
       <div class="detail" data-role="dom-detail">
@@ -62,6 +91,7 @@
       <aside class="areas">
         <button data-area="local" data-selected="true">Local Storage</button>
         <button data-area="session" data-selected="false">Session Storage</button>
+        <button data-area="cookies" data-selected="false">Cookies</button>
       </aside>
       <div class="store">
         <div class="store-head">
@@ -69,6 +99,7 @@
           <button class="ghost" data-action="storage-add">+ Add</button>
           <button class="ghost" data-action="storage-reload">Reload</button>
           <button class="ghost" data-action="storage-clear">Clear all</button>
+          <button class="ghost" data-action="site-clear">Clear site data…</button>
         </div>
         <div class="store-rows" data-role="store-rows"></div>
         <div class="store-editor" data-role="store-editor" hidden>

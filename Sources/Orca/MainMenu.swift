@@ -115,6 +115,11 @@ enum MainMenu {
             target: window,
             modifiers: []
         )
+        menu.add(
+            title: window.devToolsDockMenuTitle,
+            action: #selector(MainWindowController.toggleDevToolsDock(_:)),
+            target: window
+        )
         return wrap(menu, title: "View")
     }
 

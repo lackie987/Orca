@@ -24,6 +24,11 @@
   var nextReference = 1;
   var nextId = 1;
   var overlay = null;
+  /// Ids are namespaced per document: the panel keeps entries across reloads when "preserve log" is
+  /// on, and a restarted counter must not look like an entry it has already seen.
+  var pageToken = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  /// The element the panel last selected, exposed to the console as `$0`.
+  var lastSelected = null;
 
   // MARK: - Transport
 
@@ -32,6 +37,17 @@
       window.webkit.messageHandlers.devToolsAgent.postMessage({ channel: channel, payload: payload });
     } catch (error) {
       // A page without the Orca bridge (or a torn-down message handler) simply reports nowhere.
+    }
+  }
+
+  function safeStringify(value) {
+    if (typeof value === 'string') {
+      return value;
+    }
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch (error) {
+      return String(value);
     }
   }
 
@@ -232,7 +248,7 @@
 
   function record(level, values, stack) {
     var entry = {
-      id: nextId,
+      id: pageToken + '-' + nextId,
       level: level,
       time: Date.now(),
       url: location.href,
@@ -356,7 +372,7 @@
 
   function beginRequest(kind, method, url) {
     var record = {
-      id: 'n' + nextId,
+      id: pageToken + '-n' + nextId,
       kind: kind,
       method: method || 'GET',
       url: absolute(url),
@@ -633,6 +649,8 @@
     return path;
   }
 
+  var SKIP_TEXT_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'LINK', 'META']);
+
   function describeNode(node, path) {
     return {
       path: path,
@@ -640,7 +658,7 @@
       id: node.id || '',
       classes: node.classList ? Array.prototype.slice.call(node.classList) : [],
       children: node.children ? node.children.length : 0,
-      text: truncate(String(node.textContent || '').replace(/\s+/g, ' ').trim(), 60),
+      text: SKIP_TEXT_TAGS.has(node.tagName) ? '' : truncate(String(node.textContent || '').replace(/\s+/g, ' ').trim(), 60),
       attributes: (function () {
         var list = [];
         Array.prototype.forEach.call(node.attributes || [], function (attribute) {
@@ -792,6 +810,63 @@
     return { rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
   }
 
+  var picker = null;
+
+  /// Arms the picker: hovering highlights, clicking selects and reports, Escape backs out.
+  function startPick() {
+    if (picker) {
+      return;
+    }
+    var cursor = document.createElement('style');
+    cursor.setAttribute('data-orca-devtools-overlay', 'on');
+    cursor.textContent = '*, *::before, *::after { cursor: crosshair !important; }';
+    document.documentElement.appendChild(cursor);
+
+    function onMove(event) {
+      var target = event.target;
+      if (target && target.nodeType === 1) {
+        highlight(pathOf(target));
+      }
+    }
+    function onClick(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var target = event.target;
+      stopPick();
+      if (target && target.nodeType === 1) {
+        lastSelected = target;
+        post('picked', { path: pathOf(target) });
+      }
+    }
+    function onKey(event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        stopPick();
+        post('pickCancelled', {});
+      }
+    }
+
+    window.addEventListener('mousemove', onMove, true);
+    window.addEventListener('click', onClick, true);
+    window.addEventListener('keydown', onKey, true);
+    picker = { onMove: onMove, onClick: onClick, onKey: onKey, cursor: cursor };
+  }
+
+  function stopPick() {
+    if (!picker) {
+      return;
+    }
+    window.removeEventListener('mousemove', picker.onMove, true);
+    window.removeEventListener('click', picker.onClick, true);
+    window.removeEventListener('keydown', picker.onKey, true);
+    if (picker.cursor.parentNode) {
+      picker.cursor.parentNode.removeChild(picker.cursor);
+    }
+    picker = null;
+    clearHighlight();
+  }
+
   // MARK: - Storage
 
   function dumpStorage(store) {
@@ -827,26 +902,71 @@
 
   // MARK: - Evaluation
 
+  /// The handful of console helpers a browser gives its command line. They are real lookups, not
+  /// values copied into a sandbox: `$0` is the element the panel selected, `copy` writes the pasteboard.
+  function commandScope(state) {
+    return {
+      '$': function (selector) { return document.querySelector(selector); },
+      '$$': function (selector) { return Array.prototype.slice.call(document.querySelectorAll(selector)); },
+      '$0': lastSelected,
+      'clear': function () {
+        consoleEntries.length = 0;
+        state.cleared = true;
+      },
+      'copy': function (value) {
+        post('copy', { text: safeStringify(value) });
+        return value;
+      },
+    };
+  }
+
+  /// Builds a runner for one way of reading the input. The wrapper body is sloppy on purpose: only
+  /// sloppy code may use `with`, and `with` is what puts `$0` (not a legal parameter name) in scope.
+  function evaluationFunction(body) {
+    return new Function('__scope', '__source', 'return (async () => { with (__scope) { ' + body + ' } })();');
+  }
+
+  /// The three readings of console input, in the order a browser tries them: an expression, then the
+  /// same text through `eval` so the last statement's value survives (`var x = 3; x * 2` is 6), then
+  /// the text as a block — which is what finally allows `await` between statements.
+  function evaluationBodies(source) {
+    return [
+      'return (' + source + ');',
+      'return eval(__source);',
+      source,
+    ];
+  }
+
   async function evaluate(code) {
     var source = String(code || '');
     if (!source.trim()) {
       return { ok: true, value: { kind: 'undefined', text: '' } };
     }
+    var state = { cleared: false };
     try {
       var value;
-      try {
-        value = await new Function('return (' + source + ')').call(window);
-      } catch (inner) {
-        if (!(inner instanceof SyntaxError)) {
-          throw inner;
+      var lastError = null;
+      for (var body of evaluationBodies(source)) {
+        try {
+          value = await evaluationFunction(body).call(window, commandScope(state), source);
+          lastError = null;
+          break;
+        } catch (inner) {
+          // Only a syntax error means "read it another way"; a real failure is the answer.
+          if (!(inner instanceof SyntaxError)) {
+            throw inner;
+          }
+          lastError = inner;
         }
-        // Statements (declarations, loops, `await`) are a second attempt, not a fallback for errors.
-        value = await new Function('return (async () => { ' + source + ' })()').call(window);
       }
-      return { ok: true, value: serialize(value, 2) };
+      if (lastError) {
+        throw lastError;
+      }
+      return { ok: true, value: serialize(value, 2), cleared: state.cleared };
     } catch (error) {
       return {
         ok: false,
+        cleared: state.cleared,
         error: {
           name: (error && error.name) || 'Error',
           message: String((error && error.message) || error),
@@ -884,6 +1004,15 @@
         return boxOf(args.path || []);
       case 'dom.highlight':
         return highlight(args.path || null);
+      case 'dom.select':
+        lastSelected = nodeAt(args.path || []);
+        return { ok: true };
+      case 'dom.pick.start':
+        startPick();
+        return { ok: true };
+      case 'dom.pick.stop':
+        stopPick();
+        return { ok: true };
       case 'dom.path':
         return { path: pathOf(args.node || document.activeElement) };
       case 'storage.list':

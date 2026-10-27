@@ -13,6 +13,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var hasRevealedPage = false
     /// View under the web view. It carries the theme base so no gap shows the default window grey.
     private var contentBackdrop: NSView?
+    /// The page and the startup surface, i.e. everything the developer-tools panel takes space from.
+    private let pageArea = NSView()
+    /// Constraints that attach the panel to its current edge; swapped when the dock changes.
+    private var devToolsLayout: [NSLayoutConstraint] = []
     /// Safety net for a page that never reports it finished; the surface must not outlive it forever.
     private var revealFallback: DispatchWorkItem?
 
@@ -99,6 +103,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         devTools.toggle()
     }
 
+    /// Title for the View menu item that moves the panel to the other edge.
+    var devToolsDockMenuTitle: String {
+        devTools.dock.oppositeMenuTitle
+    }
+
+    @objc func toggleDevToolsDock(_ sender: NSMenuItem) {
+        devTools.toggleDock()
+        sender.title = devTools.dock.oppositeMenuTitle
+    }
+
     @objc func openInBrowser(_ sender: Any?) {
         guard let url = accessURLOrBeep() else { return }
         NSWorkspace.shared.open(url)
@@ -181,9 +195,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.contentView = container
         contentBackdrop = container
 
-        // The page and the startup surface share the area above the panel, so opening the developer
-        // tools shortens the page rather than covering its bottom edge.
-        let pageArea = NSView()
+        // The page and the startup surface share the area the panel does not take, so opening the
+        // developer tools shortens the page rather than covering one of its edges.
         pageArea.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(pageArea)
         container.addSubview(devTools.panel)
@@ -192,13 +205,37 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         NSLayoutConstraint.activate([
             pageArea.topAnchor.constraint(equalTo: container.topAnchor),
             pageArea.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            pageArea.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            pageArea.bottomAnchor.constraint(equalTo: devTools.panel.topAnchor),
-
-            devTools.panel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            devTools.panel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            devTools.panel.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
+
+        devTools.restoreDock()
+        applyDevToolsDock(devTools.dock, in: container)
+        devTools.onDockChange = { [weak self] dock in
+            self?.applyDevToolsDock(dock, in: container)
+        }
+    }
+
+    /// Attaches the panel and the page area to one edge of the window.
+    private func applyDevToolsDock(_ dock: DevToolsDock, in container: NSView) {
+        NSLayoutConstraint.deactivate(devToolsLayout)
+        switch dock {
+        case .bottom:
+            devToolsLayout = [
+                pageArea.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                pageArea.bottomAnchor.constraint(equalTo: devTools.panel.topAnchor),
+                devTools.panel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                devTools.panel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                devTools.panel.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            ]
+        case .right:
+            devToolsLayout = [
+                pageArea.trailingAnchor.constraint(equalTo: devTools.panel.leadingAnchor),
+                pageArea.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                devTools.panel.topAnchor.constraint(equalTo: container.topAnchor),
+                devTools.panel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                devTools.panel.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            ]
+        }
+        NSLayoutConstraint.activate(devToolsLayout)
     }
 
     private func connect() {

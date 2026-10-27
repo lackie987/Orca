@@ -139,6 +139,7 @@ sequenceDiagram
 | 重启本地服务 | ⇧⌘R |
 | 在浏览器打开（带 token 的地址） | ⇧⌘O |
 | 开发者工具（Console / Network / Elements / Storage） | F12 或 ⌥⌘I |
+| 元素拾取（在页面上点一个元素） | ⌘⇧C |
 | Orca 设置（端口 / Profile / 命令） | ⌥⌘, |
 | 退出 | ⌘Q |
 
@@ -175,15 +176,20 @@ Electron 默认菜单的键位整理在 `ElectronDefaults`（`ElectronShortcuts.
 
 ## 开发者工具
 
-F12（或 ⌥⌘I）在窗口底部打开面板，⌘1–⌘4 切换页签，拖面板上沿的细条改高度（双击回到 320pt）。
-高度写进 `devToolsHeight`，下次打开沿用；面板本身不持久化开关状态——和 Chrome 一样，每次启动是关着的。
+F12（或 ⌥⌘I）打开面板，⌘1–⌘4 切换页签，拖面板内侧的细条改尺寸（双击复位）。
+底部的尺寸记在 `devToolsHeight`、右侧的记在 `devToolsWidth`；停靠边记在 `devToolsDock`，
+`View → Dock Developer Tools on the Right / at the Bottom` 切换。面板本身不持久化开关状态——
+和 Chrome 一样，每次启动是关着的。
 
 | 页签 | 内容 |
 | --- | --- |
-| Console | `console.*`、未捕获异常、未处理的 rejection；`›` 里执行表达式（支持 `await`），对象点开是页面里的**活对象**，用引用 id 取回，不是快照字符串 |
-| Network | `fetch` / `XMLHttpRequest` / `WebSocket` 的请求：方法、状态、耗时、大小、请求头与响应头、请求体与响应体；另外用 Resource Timing 补上模块、样式、图片这类只出现在时间线上的资源（这类没有状态码，如实显示 `—`） |
-| Elements | 从 `<html>` 开始的元素树、盒模型、计算样式、命中规则（仅同源样式表）；悬停或选中会在页面上画出高亮框 |
-| Storage | localStorage / sessionStorage 的读取、编辑、删除、清空 |
+| Console | `console.*`、未捕获异常、未处理的 rejection；按 Errors / Warnings / Info 分级筛选，可开时间戳；`›` 里执行表达式（支持 `await`），带 `$`、`$$`、`$0`、`copy()`、`clear()`；对象点开是页面里的**活对象**，用引用 id 取回，不是快照字符串 |
+| Network | `fetch` / `XMLHttpRequest` / `WebSocket` 的请求：方法、状态、耗时、大小、请求头与响应头、请求体与响应体；按 Fetch / XHR / WS / Resources 筛选，点表头排序；详情可 Copy URL、Copy as cURL；另外用 Resource Timing 补上模块、样式、图片这类只出现在时间线上的资源（这类没有状态码，如实显示 `—`） |
+| Elements | 从 `<html>` 开始的元素树、盒模型、计算样式、命中规则（仅同源样式表）；悬停或选中在页面上画出高亮框；⌘⇧C 进入拾取模式（页面上悬停即高亮、点击即选中该行、Esc 取消），`Refresh` 重新读一次文档 |
+| Storage | localStorage / sessionStorage 的读取、编辑、删除、清空；**Cookies** 从 `WKWebsiteDataStore` 读，连 `HttpOnly` 的也能看见并单条删除；`Clear site data…` 清掉该 origin 的全部站点数据并重载页面 |
+
+`Preserve log` 打开时，导航不再清空面板：旧文档的记录留在上面，新文档用一条 `navigation` 分隔行接上
+（记录 id 带每页 token，重载后不会和新记录撞号）。关闭时按浏览器习惯清空。
 
 **为什么自己实现，而不是包一层 WebKit inspector**：WKWebView 没有可嵌入的检查器界面。
 私有 `_WKInspector` 在 macOS 26 上仍然存在，`show` / `connect` / `attach` 都能调，但**不产生任何
@@ -198,6 +204,12 @@ F12（或 ⌥⌘I）在窗口底部打开面板，⌘1–⌘4 切换页签，拖
   命名消息通道与壳通信，碰不到页面自己的存储和脚本。
 - `console.eval` 走 `callAsyncJavaScript`，所以 `await` 与 promise 的语义和浏览器控制台一致；
   对象展开用的是页面里 `Map` 保存的引用（上限 1000 条，超出丢最旧的），不是把对象转成字符串再假装可展开。
+  命令行的 `$0` 不是合法参数名，所以求值走一层 `with (__scope)` 的包装（Function 构造器默认非严格模式），
+  而不是把 `$0` 拍成字符串再 `eval` 一次。
+- **Cookie 与站点数据由壳回答，不经页面**：它们存在 `WKWebsiteDataStore` 里，文档本来就看不见
+  `HttpOnly` 的那部分。`cookies.*` 与 `site.clear` 因此在 `DevToolsSiteData` 里处理，
+  面板的其它命令才转发给页面代理。清除站点数据后会重载页面——否则文档仍握着内存里那份旧 storage，
+  面板显示已清空、页面却还在用旧值，两边对不上。
 
 拿不到就显示拿不到，不补默认值：fetch 的 404 是真实 404，资源时间线没有状态码就显示 `—`，
 跨源样式表读不到就写「读不到」，命令失败时状态栏给出原因。
@@ -292,11 +304,13 @@ Sources/Orca/
     WebPageBridgeDesktop.swift    目录选择、快捷键 / deviceInfo、关窗（orcaDesktop）
 
   开发者工具
-    DevToolsController.swift      面板生命周期、F12 监听、主题同步、面板与页面之间的转发
-    DevToolsPanelView.swift       底部 dock：分隔线、拖高、显示与隐藏
+    DevToolsController.swift      面板生命周期、快捷键、停靠、主题、面板与页面之间的转发
+    DevToolsPanelView.swift       dock：分隔线、拖拽改尺寸、两种停靠方向、显示与隐藏
+    DevToolsDock.swift            停靠边（bottom / right）与菜单文案
     DevToolsFrontend.swift        面板前端的 web view 与它那条消息通道
+    DevToolsSiteData.swift        Cookie 与站点数据（壳侧，页面看不到的那一半）
     DevToolsAssets.swift          bundle 里的面板素材与要注入的代理源码
-    DevToolsPageBridge.swift      面板需要页面提供什么（一条命令通道）
+    DevToolsPageBridge.swift      面板需要页面提供什么（命令通道 + 数据存储/来源/重载）
     WebPageDevTools.swift         上面那条通道的实现（callAsyncJavaScript，页面内容世界）
 
   服务
@@ -361,10 +375,12 @@ package.sh                        打 DMG / PKG 安装包（dist/，附 SHA-256�
 
 ## 已知限制
 
-- 开发者工具覆盖 Console / Network / Elements / Storage，没有 Sources 断点、没有网络节流与设备模拟。
+- 开发者工具覆盖 Console / Network / Elements / Storage，没有 Sources 断点、没有网络节流、设备模拟与网络瀑布图。
   网络只看得见 `fetch` / `XMLHttpRequest` / `WebSocket`，其余资源靠 Resource Timing 补时间线，
   那些行没有状态码。响应体各留 64 KB，只有最新 100 条请求保留 body；console 环形缓冲 800 条。
 - 跨源样式表的规则读不到（`cssRules` 抛 SecurityError），Elements 里会注明读不到几张。
+- `Clear site data…` 按 `WKWebsiteDataRecord` 的显示名（origin 的 host）匹配，清完会重载页面；
+  只清当前 origin，不是整个 App 的数据。
 - 面板只服务主窗口；页面自己开的弹窗（登录授权页）不在它的覆盖范围。
 - Orca 自带一个 `dsh web` 实例。如果同时开着终端里的 `dsh web`（3080），两个实例共享 `~/.dsh` 存储，
   会话引用与工作区状态可能互相干扰；日常建议只保留 Orca。若那个实例占用了设置里的端口，下一次启动会把它回收以保住 origin。
