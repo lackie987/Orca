@@ -57,10 +57,6 @@ extension WebPageController: WKNavigationDelegate {
         download.delegate = self
     }
 
-    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        onNavigationStarted?()
-    }
-
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         let fullscreen = webView.window?.styleMask.contains(.fullScreen) ?? false
         applyFullscreen(fullscreen)

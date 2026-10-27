@@ -5,7 +5,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let service: ServiceController
     private let preferences: Preferences
     private let page: WebPageController
-    private let devTools: DevToolsController
+    private let inspector: InspectorController
     private let chrome: WindowChrome
     private let splash = SplashView()
     private var loadedURL: URL?
@@ -14,9 +14,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// View under the web view. It carries the theme base so no gap shows the default window grey.
     private var contentBackdrop: NSView?
     /// The page and the startup surface, i.e. everything the developer-tools panel takes space from.
-    private let pageArea = NSView()
-    /// Constraints that attach the panel to its current edge; swapped when the dock changes.
-    private var devToolsLayout: [NSLayoutConstraint] = []
     /// Safety net for a page that never reports it finished; the surface must not outlive it forever.
     private var revealFallback: DispatchWorkItem?
 
@@ -28,7 +25,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         self.preferences = preferences
         let page = WebPageController(preferences: preferences)
         self.page = page
-        self.devTools = DevToolsController(page: page, preferences: preferences)
+        self.inspector = InspectorController(page: page)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 840),
@@ -100,17 +97,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc func toggleDevTools(_ sender: Any?) {
-        devTools.toggle()
+        inspector.toggle()
     }
 
-    /// Title for the View menu item that moves the panel to the other edge.
-    var devToolsDockMenuTitle: String {
-        devTools.dock.oppositeMenuTitle
+    @objc func selectElementForInspection(_ sender: Any?) {
+        inspector.selectElement()
     }
 
-    @objc func toggleDevToolsDock(_ sender: NSMenuItem) {
-        devTools.toggleDock()
-        sender.title = devTools.dock.oppositeMenuTitle
+    @objc func showInspectorConsole(_ sender: Any?) {
+        inspector.showConsole()
     }
 
     @objc func openInBrowser(_ sender: Any?) {
@@ -195,47 +190,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.contentView = container
         contentBackdrop = container
 
-        // The page and the startup surface share the area the panel does not take, so opening the
-        // developer tools shortens the page rather than covering one of its edges.
-        pageArea.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(pageArea)
-        container.addSubview(devTools.panel)
-        Layout.fill(page.webView, splash, in: pageArea)
-
-        NSLayoutConstraint.activate([
-            pageArea.topAnchor.constraint(equalTo: container.topAnchor),
-            pageArea.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-        ])
-
-        devTools.restoreDock()
-        applyDevToolsDock(devTools.dock, in: container)
-        devTools.onDockChange = { [weak self] dock in
-            self?.applyDevToolsDock(dock, in: container)
-        }
-    }
-
-    /// Attaches the panel and the page area to one edge of the window.
-    private func applyDevToolsDock(_ dock: DevToolsDock, in container: NSView) {
-        NSLayoutConstraint.deactivate(devToolsLayout)
-        switch dock {
-        case .bottom:
-            devToolsLayout = [
-                pageArea.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-                pageArea.bottomAnchor.constraint(equalTo: devTools.panel.topAnchor),
-                devTools.panel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                devTools.panel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-                devTools.panel.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            ]
-        case .right:
-            devToolsLayout = [
-                pageArea.trailingAnchor.constraint(equalTo: devTools.panel.leadingAnchor),
-                pageArea.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-                devTools.panel.topAnchor.constraint(equalTo: container.topAnchor),
-                devTools.panel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-                devTools.panel.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            ]
-        }
-        NSLayoutConstraint.activate(devToolsLayout)
+        // WebKit docks its own inspector inside the web view, so the shell has nothing to lay out
+        // for it: the page and the startup surface just fill the window as before.
+        Layout.fill(page.webView, splash, in: container)
     }
 
     private func connect() {
@@ -263,12 +220,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         page.onCloseWindow = { [weak self] in
             self?.window?.performClose(nil)
         }
-        page.onDevToolsEvent = { [weak self] channel, payload in
-            self?.devTools.receive(channel: channel, payload: payload)
-        }
-        page.onNavigationStarted = { [weak self] in
-            self?.devTools.pageWillReload()
-        }
     }
 
     /// Stores the base colour a theme published and repaints the splash surface with it.
@@ -277,7 +228,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let changed = preferences.splashBaseColor != hex
         preferences.splashBaseColor = hex
         paintBase(color)
-        devTools.applyTheme(base: hex)
         // A template icon that follows the theme is painted in this very colour, so a plane switch
         // has to re-derive it — otherwise the icon keeps the previous theme's background until the
         // icon settings are touched again.
@@ -351,6 +301,5 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         default:
             NSApp.appearance = nil
         }
-        devTools.applyTheme(base: preferences.splashBaseColor)
     }
 }

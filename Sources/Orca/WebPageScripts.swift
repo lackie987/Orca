@@ -27,11 +27,6 @@ enum WebPageScripts {
             atStart(appVersionScript),
             atStart(console),
         ]
-        // The agent has to be in place before the app boots: console calls, requests and the DOM the
-        // panel queries later are all only observable from a script that ran first.
-        if !DevToolsAssets.agentSource.isEmpty {
-            scripts.append(atStart(DevToolsAssets.agentSource))
-        }
         scripts += [
             atStart(directoryPicker),
             atStart(titleBar),

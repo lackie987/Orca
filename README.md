@@ -138,7 +138,7 @@ sequenceDiagram
 | 最小化 | ⌘M |
 | 重启本地服务 | ⇧⌘R |
 | 在浏览器打开（带 token 的地址） | ⇧⌘O |
-| 开发者工具（Console / Network / Elements / Storage） | F12 或 ⌥⌘I |
+| 开发者工具（WebKit Web Inspector） | F12 或 ⌥⌘I |
 | 元素拾取（在页面上点一个元素） | ⌘⇧C |
 | Orca 设置（端口 / Profile / 命令） | ⌥⌘, |
 | 退出 | ⌘Q |
@@ -176,47 +176,31 @@ Electron 默认菜单的键位整理在 `ElectronDefaults`（`ElectronShortcuts.
 
 ## 开发者工具
 
-F12（或 ⌥⌘I）打开面板，⌘1–⌘4 切换页签，拖面板内侧的细条改尺寸（双击复位）。
-底部的尺寸记在 `devToolsHeight`、右侧的记在 `devToolsWidth`；停靠边记在 `devToolsDock`，
-`View → Dock Developer Tools on the Right / at the Bottom` 切换。面板本身不持久化开关状态——
-和 Chrome 一样，每次启动是关着的。
+F12（或 ⌥⌘I）开关 **WebKit 自带的 Web Inspector**——就是 Safari「开发」菜单里那一个：Elements、Console、
+Sources、Network、Timelines、Storage、Graphics、Layers 全都在，dock 在窗口内，跟着窗口一起缩放。
+关掉再开，面板、选中的元素、控制台历史都还在原处。
 
-| 页签 | 内容 |
-| --- | --- |
-| Console | `console.*`、未捕获异常、未处理的 rejection；按 Errors / Warnings / Info 分级筛选，可开时间戳；`›` 里执行表达式（支持 `await`），带 `$`、`$$`、`$0`、`copy()`、`clear()`；对象点开是页面里的**活对象**，用引用 id 取回，不是快照字符串 |
-| Network | `fetch` / `XMLHttpRequest` / `WebSocket` 的请求：方法、状态、耗时、大小、请求头与响应头、请求体与响应体；按 Fetch / XHR / WS / Resources 筛选，点表头排序；详情可 Copy URL、Copy as cURL；另外用 Resource Timing 补上模块、样式、图片这类只出现在时间线上的资源（这类没有状态码，如实显示 `—`） |
-| Elements | 从 `<html>` 开始的元素树、盒模型、计算样式、命中规则（仅同源样式表）；悬停或选中在页面上画出高亮框；⌘⇧C 进入拾取模式（页面上悬停即高亮、点击即选中该行、Esc 取消），`Refresh` 重新读一次文档 |
-| Storage | localStorage / sessionStorage 的读取、编辑、删除、清空；**Cookies** 从 `WKWebsiteDataStore` 读，连 `HttpOnly` 的也能看见并单条删除；`Clear site data…` 清掉该 origin 的全部站点数据并重载页面 |
+| 操作 | 快捷键 | 说明 |
+| --- | --- | --- |
+| 打开 / 关闭检查器 | F12、⌥⌘I | 与浏览器同义 |
+| 元素拾取 | ⌘⇧C | 打开检查器并进入拾取模式：页面里悬停即高亮，点击就选中那个元素 |
+| 只看控制台 | View → Show Console | 直接落到 Console 页签 |
+| 右键「检查元素」 | 右键菜单 | WebKit 提供的菜单项（靠开发者附加项，见下） |
 
-`Preserve log` 打开时，导航不再清空面板：旧文档的记录留在上面，新文档用一条 `navigation` 分隔行接上
-（记录 id 带每页 token，重载后不会和新记录撞号）。关闭时按浏览器习惯清空。
+**它要求 `get-task-allow`**：WebKit 只为「可调试」的进程构建 inspector 前端。没有这个 entitlement，
+`show` 是一次**静默的空操作**——没有任何窗口、没有任何报错。我第一轮得出「macOS 26 上不可用」的结论就是
+因为这个：当时的测试 app 没带权限，于是把「权限不够」误判成了「平台不支持」。实际加上之后，
+`visible` 立刻变成 1，`inspectorWebView` 拿到 `inspector-resource:///Main.html`，整套界面都在。
 
-**为什么自己实现，而不是包一层 WebKit inspector**：WKWebView 没有可嵌入的检查器界面。
-私有 `_WKInspector` 在 macOS 26 上仍然存在，`show` / `connect` / `attach` 都能调，但**不产生任何
-前端界面**（实测 `isVisible` 恒 0、`inspectorWebView` 恒为 nil、窗口列表不新增窗口）；Safari 的
-「开发」菜单又只能把检查器开在 Safari 里，做不到 F12 在 Orca 里唤出、也无法脚本化。
-所以面板是「注入页面的采集代理 + 原生 dock + 面板前端」三层自己接起来的：
+所以 `build.sh` 现在统一用 `Resources/Orca.entitlements` 签名（`package.sh` 调用同一个脚本，DMG/PKG
+也带着它）。同时 `WKPreferences._developerExtrasEnabled` 被打开——**光设 `isInspectable` 不够**，
+它只负责把页面暴露给 Safari，不会在应用内构出检查器，右键菜单也不会出现「检查元素」。
 
-- `Resources/DevTools/agent.js` 在 documentStart 注入，包装 console 与 fetch/XHR/WebSocket。
-  **只观察、不改行为**：每个包装都原样调用原函数并返回它自己的结果，采集抛错一律吞掉；
-  响应体用 `clone()` 读，不会把页面的 body 消费掉。
-- 面板前端是独立的 WKWebView（加载 bundle 里的 `panel.html`），四个页签由它绘制。它只通过一个
-  命名消息通道与壳通信，碰不到页面自己的存储和脚本。
-- `console.eval` 走 `callAsyncJavaScript`，所以 `await` 与 promise 的语义和浏览器控制台一致；
-  对象展开用的是页面里 `Map` 保存的引用（上限 1000 条，超出丢最旧的），不是把对象转成字符串再假装可展开。
-  命令行的 `$0` 不是合法参数名，所以求值走一层 `with (__scope)` 的包装（Function 构造器默认非严格模式），
-  而不是把 `$0` 拍成字符串再 `eval` 一次。
-- **Cookie 与站点数据由壳回答，不经页面**：它们存在 `WKWebsiteDataStore` 里，文档本来就看不见
-  `HttpOnly` 的那部分。`cookies.*` 与 `site.clear` 因此在 `DevToolsSiteData` 里处理，
-  面板的其它命令才转发给页面代理。清除站点数据后会重载页面——否则文档仍握着内存里那份旧 storage，
-  面板显示已清空、页面却还在用旧值，两边对不上。
+打开失败时不会静默：0.8 秒后若 `isVisible` 仍为 false，会弹一条 sheet 说明缺了哪个 entitlement、怎么重建
+（这条校验也防「按了 F12 又立刻按一次」被误判：关闭会取消上一次的校验）。
 
-拿不到就显示拿不到，不补默认值：fetch 的 404 是真实 404，资源时间线没有状态码就显示 `—`，
-跨源样式表读不到就写「读不到」，命令失败时状态栏给出原因。
-
-F12 是**本地按键监听**，不是菜单键：在页面拿到事件之前截走，页面里的快捷键录制不会抢走它
-（浏览器里 F12 也是这个语义）。macOS 默认把 F12 当音量键，需要打开「系统设置 → 键盘 →
-使用 F1、F2 等键作为标准功能键」，或者按 fn+F12；⌥⌘I 任何时候都可用，View 菜单里也有同名项。
+> 早期版本里这套工具是自研的（注入 agent + 原生 dock + 面板前端，四个页签）。既然原生 inspector 完整可用，
+> 就没必要维护一份更弱的复制品，自研实现留在 git 历史里（`1f1a012` 及之前），需要时可以取回。
 
 ## 设置
 
@@ -231,7 +215,6 @@ F12 是**本地按键监听**，不是菜单键：在页面拿到事件之前截
 | Profile | `web` | `dsh` 启动的 profile |
 | dsh command | `dsh` | PATH 名或绝对路径；GUI 进程继承 launchd 的最小 PATH，应用会自动在 `~/.npm-global/bin`、`~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 等目录查找 |
 | Keep the local service running after Orca quits | 关 | 退出后保留服务，下次启动直接复用 |
-| Enable the Web Inspector | 关 | 让 Safari 的「开发」菜单能连上这个页面；Orca 自己的开发者工具不依赖它 |
 
 改端口 / Profile / 命令会重启服务。改端口会换页面 origin，但 localStorage 里的界面状态（主题、插件设置、上次会话等）
 会先被快照、再在新 origin 的 `documentStart` 阶段写回，**不会重置**；各插件写在磁盘上的服务端配置本来就不受影响。
@@ -304,14 +287,7 @@ Sources/Orca/
     WebPageBridgeDesktop.swift    目录选择、快捷键 / deviceInfo、关窗（orcaDesktop）
 
   开发者工具
-    DevToolsController.swift      面板生命周期、快捷键、停靠、主题、面板与页面之间的转发
-    DevToolsPanelView.swift       dock：分隔线、拖拽改尺寸、两种停靠方向、显示与隐藏
-    DevToolsDock.swift            停靠边（bottom / right）与菜单文案
-    DevToolsFrontend.swift        面板前端的 web view 与它那条消息通道
-    DevToolsSiteData.swift        Cookie 与站点数据（壳侧，页面看不到的那一半）
-    DevToolsAssets.swift          bundle 里的面板素材与要注入的代理源码
-    DevToolsPageBridge.swift      面板需要页面提供什么（命令通道 + 数据存储/来源/重载）
-    WebPageDevTools.swift         上面那条通道的实现（callAsyncJavaScript，页面内容世界）
+    InspectorController.swift     WebKit Web Inspector 的开关、元素拾取、快捷键与失败提示
 
   服务
     ServiceController.swift       dsh 子进程、就绪探测、复用与看护、退出
@@ -336,7 +312,7 @@ Sources/Orca/
 
 Resources/AppIcon.icns            仓库默认图标
 Resources/Icons/                  六个预设的素材（含 OrcaMark.png / OrcaOutline.svg）
-Resources/DevTools/               开发者工具：panel.html / panel.css / panel.js / agent.js
+Resources/Orca.entitlements       get-task-allow——检查器靠它才构得出来（签名时带上）
 Resources/Info.plist              bundle 元数据与 ATS / 隐私说明
 build.sh                          编译 + 组装 + 安装
 package.sh                        打 DMG / PKG 安装包（dist/，附 SHA-256）
@@ -344,13 +320,11 @@ package.sh                        打 DMG / PKG 安装包（dist/，附 SHA-256�
 
 ## 设计取舍
 
-- **开发者工具自己实现，不指望 WKWebView 的检查器**。`_WKInspector` 的 `show` 在本机
-  （macOS 26）什么都不画，而 Safari 的检查器只能开在 Safari 里；要「F12 在窗口里弹出」就只能自己接链路。
-  面板前端照样是 web（`panel.html`），但跑在独立的 content process 里，和页面之间只留一条消息通道：
-  面板读不到页面的 storage，页面也碰不到面板的 DOM。代价是没有 Sources 断点与网络节流，
-  换来的是这条链路完全在 Orca 手里，能跟着页面主题和窗口布局一起改。
-- **采集代理写在 `agent.js` 里，不写成 Swift 字符串**。这个文件够长，值得有语法高亮、能被独立加载测试；
-  bundle 里少这个目录时，`DevToolsAssets` 会直接说「工具没装」，而不是注入一个空壳假装没日志。
+- **检查器用 WebKit 自己的，不自己造**。WKWebView 没有公开的「显示检查器」接口，但私有 `_WKInspector`
+  就是 Safari 用的那一个，`show` / `hide` / `showConsole` / `toggleElementSelection` 都在。它唯一的门槛是
+  进程得可调试（`get-task-allow`），这属于签名策略而不是代码能力——把它写进 `Resources/Orca.entitlements`
+  交给 `build.sh`，就只剩「按 F12」这件事了。自己写一份 Elements/Network 的复制品，本质是在一个更弱的层面上
+  重复 WebKit 已经有的东西。
 - **按桌面运行时跑，而不是浏览器路径**。Orca 设 `html[data-platform="darwin"]`，DSH 的快捷键服务便按桌面壳工作；
   它要求的 `window.dshDesktop` 键盘桥由注入脚本临时提供，shortcuts 服务捕获后立刻撤下，其余插件仍走 Web 路径。
   反过来（不设该属性）会让桌面快捷键录不进 ⌘C、⌘K 这类键。
@@ -375,12 +349,12 @@ package.sh                        打 DMG / PKG 安装包（dist/，附 SHA-256�
 
 ## 已知限制
 
-- 开发者工具覆盖 Console / Network / Elements / Storage，没有 Sources 断点、没有网络节流、设备模拟与网络瀑布图。
-  网络只看得见 `fetch` / `XMLHttpRequest` / `WebSocket`，其余资源靠 Resource Timing 补时间线，
-  那些行没有状态码。响应体各留 64 KB，只有最新 100 条请求保留 body；console 环形缓冲 800 条。
-- 跨源样式表的规则读不到（`cssRules` 抛 SecurityError），Elements 里会注明读不到几张。
-- `Clear site data…` 按 `WKWebsiteDataRecord` 的显示名（origin 的 host）匹配，清完会重载页面；
-  只清当前 origin，不是整个 App 的数据。
+- 检查器来自 WebKit 的私有接口（`_WKInspector`），不是公开 API：macOS 大版本升级后有失效的可能，
+  失效时的表现是「按 F12 什么都不发生」，此时那条 sheet 会说明现状。快捷方式本身（⌘⇧C 拾取、
+  View → Show Console）也走同一套接口。
+- 带 `get-task-allow` 意味着任何同用户进程都能附加调试器到 Orca。这是本地开发壳的取舍：
+  要么接受它、要么没有检查器。要发布给不特定用户时，请自行决定是否保留。
+- 检查器只挂在主窗口的 web view 上；页面自己开的弹窗（登录授权页）不在它的覆盖范围。
 - 面板只服务主窗口；页面自己开的弹窗（登录授权页）不在它的覆盖范围。
 - Orca 自带一个 `dsh web` 实例。如果同时开着终端里的 `dsh web`（3080），两个实例共享 `~/.dsh` 存储，
   会话引用与工作区状态可能互相干扰；日常建议只保留 Orca。若那个实例占用了设置里的端口，下一次启动会把它回收以保住 origin。

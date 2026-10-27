@@ -21,11 +21,6 @@ final class SettingsWindowController: NSWindowController {
         target: nil,
         action: nil
     )
-    private let inspectorCheckbox = NSButton(
-        checkboxWithTitle: "Enable the Web Inspector",
-        target: nil,
-        action: nil
-    )
     private var originalPort = 0
     private var originalProfile = ""
     private var originalCommand = ""
@@ -77,7 +72,6 @@ final class SettingsWindowController: NSWindowController {
         )
 
         keepAliveCheckbox.font = .systemFont(ofSize: 13)
-        inspectorCheckbox.font = .systemFont(ofSize: 13)
 
         let hint = NSTextField(labelWithString: "Changes to the port, profile, or command restart the local service.")
         hint.font = .systemFont(ofSize: 11)
@@ -107,7 +101,6 @@ final class SettingsWindowController: NSWindowController {
             commandRow,
             divider,
             keepAliveCheckbox,
-            inspectorCheckbox,
             hint,
             buttons,
         ])
@@ -164,7 +157,6 @@ final class SettingsWindowController: NSWindowController {
         profileField.stringValue = originalProfile
         commandField.stringValue = originalCommand
         keepAliveCheckbox.state = preferences.keepServiceRunningAfterQuit ? .on : .off
-        inspectorCheckbox.state = preferences.developerExtras ? .on : .off
     }
 
     // MARK: - Actions
@@ -186,7 +178,6 @@ final class SettingsWindowController: NSWindowController {
         preferences.profile = profile
         preferences.command = command
         preferences.keepServiceRunningAfterQuit = keepAliveCheckbox.state == .on
-        preferences.developerExtras = inspectorCheckbox.state == .on
 
         let needsRestart = port != originalPort || profile != originalProfile || command != originalCommand
         close()

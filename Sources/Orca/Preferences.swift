@@ -9,11 +9,7 @@ final class Preferences {
         static let profile = "profileName"
         static let command = "dshCommand"
         static let keepServiceRunning = "keepServiceRunningAfterQuit"
-        static let developerExtras = "developerExtras"
         static let pageZoom = "pageZoom"
-        static let devToolsHeight = "devToolsHeight"
-        static let devToolsWidth = "devToolsWidth"
-        static let devToolsDock = "devToolsDock"
         static let titleBarMode = "titleBarMode"
         static let splashBaseColor = "splashBaseColor"
         static let appIconPreset = "appIconPreset"
@@ -32,11 +28,7 @@ final class Preferences {
             Key.profile: "web",
             Key.command: "dsh",
             Key.keepServiceRunning: false,
-            Key.developerExtras: false,
             Key.pageZoom: 1.0,
-            Key.devToolsHeight: 320.0,
-            Key.devToolsWidth: 420.0,
-            Key.devToolsDock: DevToolsDock.bottom.rawValue,
             Key.titleBarMode: TitleBarMode.lightsOnly.rawValue,
             Key.splashBaseColor: "",
             Key.appIconPreset: "orca",
@@ -72,34 +64,10 @@ final class Preferences {
         set { defaults.set(newValue, forKey: Key.keepServiceRunning) }
     }
 
-    /// Exposes the WebKit inspector for the embedded page.
-    var developerExtras: Bool {
-        get { defaults.bool(forKey: Key.developerExtras) }
-        set { defaults.set(newValue, forKey: Key.developerExtras) }
-    }
-
     /// Page zoom preserved across launches.
     var pageZoom: Double {
         get { defaults.double(forKey: Key.pageZoom) }
         set { defaults.set(newValue, forKey: Key.pageZoom) }
-    }
-
-    /// Height of the developer-tools panel when it is docked at the bottom.
-    var devToolsHeight: Double {
-        get { defaults.double(forKey: Key.devToolsHeight) }
-        set { defaults.set(newValue, forKey: Key.devToolsHeight) }
-    }
-
-    /// Width of the developer-tools panel when it is docked on the right.
-    var devToolsWidth: Double {
-        get { defaults.double(forKey: Key.devToolsWidth) }
-        set { defaults.set(newValue, forKey: Key.devToolsWidth) }
-    }
-
-    /// Edge the developer-tools panel is docked to.
-    var devToolsDock: String {
-        get { defaults.string(forKey: Key.devToolsDock) ?? DevToolsDock.bottom.rawValue }
-        set { defaults.set(newValue, forKey: Key.devToolsDock) }
     }
 
     /// Window chrome preset written by the `dsh-orca-titlebar` plugin; `lightsOnly` (traffic lights

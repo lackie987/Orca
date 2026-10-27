@@ -8,7 +8,7 @@ import WebKit
 extension WebPageController {
     /// Wires the message channels; both groups go through weak wrappers so the web view can be freed.
     func installBridges(on userContentController: WKUserContentController) {
-        for name in ["themeSource", "titleBar", "diagnostics", "orcaPagePainted", "devToolsAgent"] {
+        for name in ["themeSource", "titleBar", "diagnostics", "orcaPagePainted"] {
             userContentController.add(WeakScriptMessageHandler(target: self), name: name)
         }
         for name in ["directoryPicker", "orcaTitleBar", "orcaPalette", "orcaAppIcon", "orcaDesktop"] {
@@ -40,12 +40,6 @@ extension WebPageController: WKScriptMessageHandler {
             }
         case "orcaPagePainted":
             onPagePainted?()
-        case "devToolsAgent":
-            // The agent reports on its own: console lines, network records and the ready handshake.
-            guard let payload = message.body as? [String: Any],
-                  let channel = payload["channel"] as? String
-            else { return }
-            onDevToolsEvent?(channel, payload["payload"] ?? [:])
         default:
             break
         }

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- WebKit only builds the Web Inspector front end for a debuggable process. Without this
+         entitlement `-[_WKInspector show]` is a silent no-op, which is exactly what a build without
+         it looks like: the menu item does nothing and nothing is logged. It is the same requirement
+         Safari's "Develop" menu applies to hosted web views. -->
+    <key>com.apple.security.get-task-allow</key>
+    <true/>
+</dict>
+</plist>

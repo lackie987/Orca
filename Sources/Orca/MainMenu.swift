@@ -116,8 +116,15 @@ enum MainMenu {
             modifiers: []
         )
         menu.add(
-            title: window.devToolsDockMenuTitle,
-            action: #selector(MainWindowController.toggleDevToolsDock(_:)),
+            title: "Select Element for Inspection",
+            action: #selector(MainWindowController.selectElementForInspection(_:)),
+            key: "c",
+            target: window,
+            modifiers: [.command, .shift]
+        )
+        menu.add(
+            title: "Show Console",
+            action: #selector(MainWindowController.showInspectorConsole(_:)),
             target: window
         )
         return wrap(menu, title: "View")

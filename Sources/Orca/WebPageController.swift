@@ -6,7 +6,7 @@ import WebKit
 ///
 /// The delegate and bridge work sits beside it by concern — `WebPageNavigation`, `WebPageBridges`,
 /// `WebPageDialogs` — and the page side of the bridges in `WebPageScripts`.
-final class WebPageController: NSObject {
+final class WebPageController: NSObject, InspectorPage {
     let webView: WKWebView
 
     /// Theme source published by the web UI (`system`, `light` or `dark`).
@@ -30,12 +30,6 @@ final class WebPageController: NSObject {
     /// Asked by the desktop shortcut bridge when a bound command closes the window.
     var onCloseWindow: (() -> Void)?
 
-    /// One event pushed by the developer-tools agent in the page: its channel and its payload.
-    var onDevToolsEvent: ((String, Any) -> Void)?
-
-    /// Fired when the main frame starts loading, so the developer tools can drop their page state.
-    var onNavigationStarted: (() -> Void)?
-
     /// Settings the page-side bridges read and write; shared with the bridge extensions.
     let preferences: Preferences
 
@@ -57,6 +51,10 @@ final class WebPageController: NSObject {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        // `isInspectable` only advertises the page to Safari; WebKit builds the *in-app* inspector
+        // front end (and adds "Inspect Element" to the context menu) only when developer extras are
+        // on. Without this line `_WKInspector.show` returns immediately and nothing appears.
+        configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
         let userContentController = WKUserContentController()
         configuration.userContentController = userContentController
 
@@ -98,8 +96,10 @@ final class WebPageController: NSObject {
     /// Applies settings that can change while the window is open.
     func applyPreferences() {
         setZoom(CGFloat(preferences.pageZoom), persist: false)
+        // Always inspectable: WebKit's inspector only opens on demand (F12, ⌘⇧C, the context menu),
+        // and leaving it off by default is what made the old "Web Inspector" menu item look broken.
         if #available(macOS 13.3, *) {
-            webView.isInspectable = preferences.developerExtras
+            webView.isInspectable = true
         }
     }
 

@@ -36,20 +36,21 @@ cp "$ICON_SOURCE" "$APP/Contents/Resources/AppIcon.icns"
 cp "$DIR/Resources/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/Icons"
 cp "$DIR/Resources/Icons/"* "$APP/Contents/Resources/Icons/"
-# The developer tools are a panel front end plus the page-side agent, both plain web assets.
-mkdir -p "$APP/Contents/Resources/DevTools"
-cp "$DIR/Resources/DevTools/"* "$APP/Contents/Resources/DevTools/"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
 
 echo "▸ Signing ($SIGN_IDENTITY)"
+# get-task-allow is what makes WebKit build its Web Inspector front end; without it the inspector
+# (F12) is a silent no-op. See Resources/Orca.entitlements.
+ENTITLEMENTS="$DIR/Resources/Orca.entitlements"
 if [ "$SIGN_IDENTITY" = "-" ]; then
   # A stable designated requirement keeps TCC grants (Documents access, etc.) across rebuilds:
   # an ad-hoc signature's default requirement is its cdhash, so every build looks like a brand
   # new app to macOS and re-asks for permission.
-  codesign --force --sign - --identifier com.xu.orca \
+  codesign --force --sign - --identifier com.xu.orca --entitlements "$ENTITLEMENTS" \
     -r='designated => identifier "com.xu.orca"' "$APP" >/dev/null 2>&1
 else
-  codesign --force --sign "$SIGN_IDENTITY" --identifier com.xu.orca "$APP" >/dev/null 2>&1
+  codesign --force --sign "$SIGN_IDENTITY" --identifier com.xu.orca \
+    --entitlements "$ENTITLEMENTS" "$APP" >/dev/null 2>&1
 fi
 
 if [ "${1:-}" = "--no-install" ]; then
