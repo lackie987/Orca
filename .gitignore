@@ -4,3 +4,6 @@ build/
 *.xcodeproj
 dist/
 storage-backup/
+# 图标处理的中间产物（未被源码引用）
+Resources/Icons/png_*.png
+Resources/Icons/svg_*.png
