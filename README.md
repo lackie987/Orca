@@ -142,7 +142,7 @@ sequenceDiagram
 | 重启本地服务 | ⇧⌘R |
 | 在浏览器打开（带 token 的地址） | ⇧⌘O |
 | 开发者工具（WebKit Web Inspector） | F12 或 ⌥⌘I |
-| 元素拾取（在页面上点一个元素，再按一次退出） | ⌘⇧C |
+| 元素拾取（在页面上点一个元素，再按 ⌘⇧C 或 Esc 退出） | ⌘⇧C |
 | Orca 设置（端口 / Profile / 命令） | ⌥⌘, |
 | 退出 | ⌘Q |
 
@@ -183,15 +183,29 @@ Orca 自己的菜单与响应链已经覆盖它列出的每一个组合——所
 ## 开发者工具
 
 F12（或 ⌥⌘I）开关 **WebKit 自带的 Web Inspector**——就是 Safari「开发」菜单里那一个：Elements、Console、
-Sources、Network、Timelines、Storage、Graphics、Layers 全都在，dock 在窗口内，跟着窗口一起缩放。
-关掉再开，面板、选中的元素、控制台历史都还在原处。
+Sources、Network、Timelines、Storage、Graphics、Layers 全都在。它**只在独立窗口里打开，从不 dock**。
+
+WebKit 默认会停靠（`platformAttach`）：停靠面板和页面争同一扇窗口的空间，页面在下面反复重排，两边都
+不肯让——这就是之前看到的闪。桌面壳没有 Safari 那种分栏仲裁，所以停靠这个选项被整个拿掉：
+
+- 进程里把 `_WKInspector` 的 `attach` 换成 `detach`：**Inspector 前端那三个停靠按钮按下去只会被拒绝**，
+  右键「检查元素」、菜单打开等不经过本控制器的路径同样只能落在独立窗口；
+- `show()` 前后各发一次 `detach()`，第一次构建也不会先停靠；
+- `watchForDock` 每秒兜底一次，发现停靠只补一次 `detach()`，不追动画连发。
+
+所以无论 **F12 / ⌥⌘I / ⌘⇧C / View → Show Console / 右键检查元素**，打开的都是独立窗口。
 
 | 操作 | 快捷键 | 说明 |
 | --- | --- | --- |
-| 打开 / 关闭检查器 | F12、⌥⌘I | 与浏览器同义 |
-| 元素拾取 | ⌘⇧C | 打开检查器并进入拾取模式：页面里悬停即高亮，点击就选中那个元素；拾取中再按一次停止，页面恢复普通点击 |
+| 打开 / 关闭检查器 | F12、⌥⌘I | 与浏览器同义；检查器在独立窗口里 |
+| 元素拾取 | ⌘⇧C | 打开检查器并进入拾取模式：页面里悬停即高亮，点击就选中那个元素；拾取中再按 ⌘⇧C 停止 |
+| 关闭 / 退出拾取 | Esc | 页面窗口里按 Esc：先停拾取，再关掉检查器（一次按键两件事）；检查器窗口里的 Esc 只停拾取，其余留给前端 |
 | 只看控制台 | View → Show Console | 直接落到 Console 页签 |
 | 右键「检查元素」 | 右键菜单 | WebKit 提供的菜单项（靠开发者附加项，见下） |
+
+**关闭检查器会先停掉拾取**：WebKit 自己不会——隐藏后页面仍留着十字光标并继续吞点击，重新打开后的
+`toggleElementSelection` 也可能被它丢掉，于是拾取再也关不掉。`hide()` 因此在关闭前先发一次停止；⌘⇧C
+按「请求状态」翻转（不是读那个会滞后的标志）。页面窗口里的 Esc 先停拾取再关检查器，检查器窗口里的 Esc 只停拾取。这一组只处理拾取，与停靠无关。
 
 **它要求 `get-task-allow`**：WebKit 只为「可调试」的进程构建 inspector 前端。没有这个 entitlement，
 `show` 是一次**静默的空操作**——没有任何窗口、没有任何报错。我第一轮得出「macOS 26 上不可用」的结论就是
@@ -317,7 +331,7 @@ Sources/Orca/
     WebPageBridgeDesktop.swift    目录选择、快捷键 / deviceInfo、关窗（orcaDesktop）
 
   开发者工具
-    InspectorController.swift     WebKit Web Inspector 的开关、元素拾取、快捷键与失败提示
+    InspectorController.swift     WebKit Web Inspector 的独立窗口、元素拾取、快捷键与失败提示
 
   服务
     ServiceController.swift       dsh 子进程、就绪探测、复用与看护、退出

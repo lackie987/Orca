@@ -1,4 +1,5 @@
 import AppKit
+import ObjectiveC
 import WebKit
 
 /// A web view the inspector can be attached to; lets the controller be tested without the shell.
@@ -15,6 +16,27 @@ protocol InspectorPage: AnyObject {
 /// (`Resources/Orca.entitlements`, applied by `build.sh`). Without the entitlement `show` does
 /// nothing at all, so this controller checks afterwards and says so instead of looking broken.
 final class InspectorController {
+    /// Rejects WebKit's docking entirely.
+    ///
+    /// `_WKInspector` docks itself by calling `attach`: that is the path behind the front end's
+    /// three dock buttons, the first-open `platformAttach`, and every open that does not come
+    /// through this controller (the page's "Inspect Element" context-menu item, for example).
+    /// Orca has no split view to arbitrate the space the dock and the page would trade, so every
+    /// attach is turned into a detach instead. The inspector can therefore only ever be its own
+    /// window, whichever shortcut or menu opened it.
+    private static let rejectDocking: Void = {
+        guard let inspectorClass = NSClassFromString("_WKInspector") else { return }
+        let detachInstead: @convention(block) (AnyObject) -> Void = { inspector in
+            _ = inspector.perform(NSSelectorFromString("detach"))
+        }
+        _ = class_replaceMethod(
+            inspectorClass,
+            NSSelectorFromString("attach"),
+            imp_implementationWithBlock(detachInstead),
+            "v@:"
+        )
+    }()
+
     /// How long a queued element-selection request waits for the front end. The first open builds
     /// the inspector UI from scratch, which is far slower than every reopen after it.
     private static let frontEndTimeout: TimeInterval = 8
@@ -25,11 +47,16 @@ final class InspectorController {
     private var keyMonitor: Any?
     /// Pending "did it actually open" check, so a second press can cancel the first one's verdict.
     private var pendingVerification: DispatchWorkItem?
+    /// Keeps a docked panel from staying docked while the inspector is open.
+    private var undockWatcher: Timer?
     /// Repeating "is the front end up yet" check for a queued element-selection request.
     private var selectionTimer: Timer?
+    /// Picker state the last press asked for; nil when no request is in flight.
+    private var pickerTarget: Bool?
     private var hasReportedUnavailable = false
 
     init(page: InspectorPage) {
+        _ = Self.rejectDocking
         self.page = page
         installKeyMonitor()
     }
@@ -37,6 +64,7 @@ final class InspectorController {
     deinit {
         pendingVerification?.cancel()
         selectionTimer?.invalidate()
+        undockWatcher?.invalidate()
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
         }
@@ -57,22 +85,69 @@ final class InspectorController {
     }
 
     func show() {
-        guard let inspector = inspector() else {
-            reportUnavailable()
-            return
-        }
-        _ = inspector.perform(NSSelectorFromString("show"))
-        verifyVisible()
+        openDetached("show")
     }
 
-    /// Opens the inspector straight to its Console panel.
+    /// Opens the inspector straight to its Console panel, in its own window.
     func showConsole() {
+        openDetached("showConsole")
+    }
+
+    /// Opens the inspector in a window of its own; it is never docked into the page.
+    ///
+    /// WebKit wants to dock the panel by default (`platformAttach`), which is the one thing this
+    /// shell cannot arbitrate: the dock and the page trade the window's space, and the page keeps
+    /// re-laying out underneath. `detach()` moves the front end into its own window, which is the
+    /// only layout Orca supports, and `rejectDocking` turns any later attach into the same
+    /// detach.
+    private func openDetached(_ command: String) {
         guard let inspector = inspector() else {
             reportUnavailable()
             return
         }
-        _ = inspector.perform(NSSelectorFromString("showConsole"))
+        _ = inspector.perform(NSSelectorFromString("detach"))
+        _ = inspector.perform(NSSelectorFromString(command))
+        // The first open of a process builds the front end before `detach()` can apply, so that
+        // build can finish attached. One more call in the same turn covers it.
+        _ = inspector.perform(NSSelectorFromString("detach"))
         verifyVisible()
+        watchForDock()
+    }
+
+    /// Keeps the panel out of the page for as long as it is open.
+    ///
+    /// One check per second, and only a single `detach()` per docked observation: re-sending
+    /// `detach()` into an ongoing dock animation is exactly what makes the page and the panel
+    /// flicker while they fight over the window's space.
+    private func watchForDock() {
+        undockWatcher?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] timer in
+            guard let self else {
+                timer.invalidate()
+                return
+            }
+            guard let inspector = self.inspector(),
+                  (inspector.value(forKey: "isVisible") as? Bool) == true
+            else {
+                self.stopWatchingForDock()
+                return
+            }
+            guard self.detachedWindow() == nil else { return }
+            _ = inspector.perform(NSSelectorFromString("detach"))
+        }
+        undockWatcher = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopWatchingForDock() {
+        undockWatcher?.invalidate()
+        undockWatcher = nil
+    }
+
+    /// The inspector's own window; nil while it is docked in the page or not built yet.
+    private func detachedWindow() -> NSWindow? {
+        guard let window = frontEnd()?.window, window !== page?.webView.window else { return nil }
+        return window
     }
 
     func hide() {
@@ -82,6 +157,11 @@ final class InspectorController {
         pendingVerification = nil
         // A queued element-selection request must not fire after the user closed the inspector.
         cancelPendingSelection()
+        stopWatchingForDock()
+        // WebKit does not end element selection when the inspector goes away: the page keeps the
+        // crosshair and keeps capturing clicks, and the next show then drops every picker toggle, so
+        // the mode can never be turned off again. Stop it while the front end still answers.
+        stopPicking()
         _ = inspector()?.perform(NSSelectorFromString("hide"))
     }
 
@@ -97,28 +177,48 @@ final class InspectorController {
     /// keyboard monitor — the menu item carries no shortcut — so a press can never toggle twice and
     /// make the picker flicker on then straight back off.
     func selectElement() {
-        guard let inspector = inspector() else { return }
-        if isVisible, isFrontEndReady(inspector) {
-            // Already up: every press flips the picker, like Safari. A queued request from a cold
-            // open must not also fire now, or the two would cancel each other out.
-            cancelPendingSelection()
-            toggleElementSelection(on: inspector)
+        guard inspector() != nil else { return }
+        let target = !(pickerTarget ?? isSelectionActive)
+        if !target, !isVisible {
+            // Picking outlived a closed inspector: stop it without opening the window again.
+            stopPicking()
             return
         }
+        pickerTarget = target
         if !isVisible {
             show()
         }
-        waitForFrontEnd { [weak self] in
-            guard let self, let inspector = self.inspector() else { return }
-            // A reopen can restore a picker that was left on; only start it when it is off, so a
-            // re-entrant call can never toggle it twice.
-            if (inspector.value(forKey: "isElementSelectionActive") as? Bool) == true { return }
-            self.toggleElementSelection(on: inspector)
-        }
+        applyPickerTarget()
     }
 
     private func toggleElementSelection(on inspector: NSObject) {
         _ = inspector.perform(NSSelectorFromString("toggleElementSelection"))
+    }
+
+    /// Applies the request in `pickerTarget` once the inspector front end can answer it.
+    private func applyPickerTarget() {
+        guard let inspector = inspector(), pickerTarget != nil else { return }
+        guard isVisible, isFrontEndReady(inspector) else {
+            waitForFrontEnd { [weak self] in self?.applyPickerTarget() }
+            return
+        }
+        // Toggle unconditionally: after a close the front end's flag can lag behind the page, and
+        // comparing against it is what turns a stop into a second start. The request itself is the
+        // truth, so each press flips exactly one state change.
+        toggleElementSelection(on: inspector)
+    }
+
+    /// Whether the page is currently in element-picking mode.
+    private var isSelectionActive: Bool {
+        (inspector()?.value(forKey: "isElementSelectionActive") as? Bool) ?? false
+    }
+
+    /// Turns the picker off when it is on, without showing or hiding the window.
+    private func stopPicking() {
+        let wasPicking = pickerTarget ?? isSelectionActive
+        pickerTarget = false
+        guard wasPicking, let inspector = inspector() else { return }
+        toggleElementSelection(on: inspector)
     }
 
     /// Runs `action` once the inspector front end is visible and loaded, or gives up after the
@@ -219,14 +319,14 @@ final class InspectorController {
 
     // MARK: - Shortcuts
 
-    /// F12 and ⌥⌘I toggle the inspector, ⌘⇧C toggles the element picker.
+    /// F12 and ⌥⌘I toggle the inspector, ⌘⇧C toggles the element picker, Esc cancels picking.
     ///
     /// A local monitor is used instead of menu key equivalents because the page's own key handling
     /// runs first for anything the web view receives: the combination has to be taken before the
     /// page sees it, and swallowed so it cannot also reach the app behind the window.
     private func installKeyMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, event.window === self.page?.webView.window else { return event }
+            guard let self, self.owns(event.window) else { return event }
             guard let shortcut = Self.shortcut(for: event) else { return event }
             // A held key must not toggle the inspector or the picker over and over.
             guard !event.isARepeat else { return nil }
@@ -235,14 +335,50 @@ final class InspectorController {
                 self.toggle()
             case .pick:
                 self.selectElement()
+            case .escape:
+                guard self.handleEscape(fromPage: event.window === self.page?.webView.window) else {
+                    return event
+                }
             }
             return nil
         }
     }
 
+    /// Whether a key event came from the page's window or from the inspector's own window.
+    private func owns(_ window: NSWindow?) -> Bool {
+        guard let window else { return false }
+        if window === page?.webView.window { return true }
+        return window === detachedWindow()
+    }
+
+    /// One Esc: cancel the picker, and — when the page sent the key — close the inspector too.
+    ///
+    /// From the page, a single Esc ends everything the inspector was doing there: the picker is
+    /// cancelled first and the window closes with it, so the crosshair cannot outlive the panel.
+    /// Esc inside the inspector's own window only cancels picking; the rest of its Esc belongs to
+    /// the front end (console editing, autocomplete).
+    ///
+    /// - Parameter fromPage: whether the key came from the page's window rather than the panel's.
+    /// - Returns: whether the key was consumed.
+    @discardableResult
+    func handleEscape(fromPage: Bool) -> Bool {
+        if isSelectionActive {
+            cancelPendingSelection()
+            stopPicking()
+            if fromPage {
+                hide()
+            }
+            return true
+        }
+        guard fromPage, isVisible else { return false }
+        hide()
+        return true
+    }
+
     private enum Shortcut {
         case toggle
         case pick
+        case escape
     }
 
     private static func shortcut(for event: NSEvent) -> Shortcut? {
@@ -257,6 +393,9 @@ final class InspectorController {
         if modifiers == [.command, .shift] && event.keyCode == KeyCode.c {
             return .pick
         }
+        if modifiers.isEmpty && event.keyCode == KeyCode.escape {
+            return .escape
+        }
         return nil
     }
 
@@ -266,5 +405,7 @@ final class InspectorController {
         static let i: UInt16 = 34
         /// `kVK_ANSI_C`.
         static let c: UInt16 = 8
+        /// `kVK_Escape`.
+        static let escape: UInt16 = 53
     }
 }

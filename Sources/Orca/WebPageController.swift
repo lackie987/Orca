@@ -55,6 +55,12 @@ final class WebPageController: NSObject, InspectorPage {
         // front end (and adds "Inspect Element" to the context menu) only when developer extras are
         // on. Without this line `_WKInspector.show` returns immediately and nothing appears.
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        // WebKit suspends the page's WebProcess as soon as its window counts as invisible. The
+        // inspector now lives in a window of its own and can cover the main one, and a hidden or
+        // minimized Orca is occluded outright; either way the suspended page loses its WebSocket to
+        // the harness ("WebSocket is closed due to suspension") and the UI falls back to reconnect
+        // retries. The shell is a long-lived session console, so its page stays alive while open.
+        configuration.preferences.setValue(false, forKey: "pageVisibilityBasedProcessSuppressionEnabled")
         let userContentController = WKUserContentController()
         configuration.userContentController = userContentController
 
