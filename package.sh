@@ -113,8 +113,10 @@ XML
   if [ -n "${ORCA_INSTALLER_IDENTITY:-}" ]; then
     sign_args=(--sign "$ORCA_INSTALLER_IDENTITY")
   fi
+  # macOS ships bash 3.2, where `set -u` treats an empty `"${sign_args[@]}"` as unbound; the
+  # `+` form expands to nothing when the array has no elements.
   productbuild --distribution "$work/distribution.xml" --package-path "$work" \
-    "${sign_args[@]}" "$pkg" >/dev/null
+    ${sign_args[@]+"${sign_args[@]}"} "$pkg" >/dev/null
   rm -rf "$work"
   echo "  $pkg"
 }
