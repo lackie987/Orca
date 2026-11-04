@@ -38,7 +38,10 @@ final class WindowChrome {
         case .hover:
             setChrome(lightsHidden: true)
             enableHover()
-        case .lightsOnly:
+        case .lightsOnly, .shown:
+            // `shown` shares this branch on purpose: it is a reserved name for the standard titled
+            // window, which this shell does not draw. It keeps the lights visible like `lightsOnly`
+            // instead of quietly changing the layout of anyone whose preference still says so.
             setChrome(lightsHidden: false)
             disableHover()
         }
