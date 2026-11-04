@@ -22,6 +22,7 @@
 | --- | --- | --- | --- |
 | B1 | 2026-11-04 | Orca 全部 Swift 源（8.5k 行，逐文件扫过 + 定点精读 6 个）＋ docs；9 个自养插件的 package.json / locale / 目录结构 / 关键 client 文件精读 3 个 | 结构层全覆盖；文案层抽样（壳的设置面板、菜单、警告全文；标题栏、首页图标、应用图标三处字典全文） |
 | B2 | 2026-11-04 | 同上 + 落地：壳本地化（新 `ShellCopy.swift`，壳的文案全部收口）、设置面板重写、插件文案与 README 的 markdown 治理 | 壳的全部用户可见文案（菜单 44 条、设置面板 14 条、启动页 7 条、服务状态 11 条、弹窗 4 组）逐一走查并双语化；9 个插件 README + Orca README + 本台账做了 markdown 语法核对 |
+| B3 | 2026-11-04 | 待办清零：两仓提交、9 个插件 `package.json` 审计、jscpd / swiftlint / knip 三个分析器各跑一次并记录结论 | 提交按主题拆开（dotfiles 4 个、Orca 2 个）；分析器结论见 §3.3 |
 
 ---
 
@@ -35,6 +36,7 @@
 | M4 | Orca（重复代码） | `ColorHex` 两处按 0–255 通道构造 `NSColor` 的代码收成私有 `srgb(red:green:blue:)`，`color()` 与 `fromCSS()` 共用。对应关闭 T7 | 2026-11-04 | 已改，编译通过 | `ColorHex.swift:6-50` |
 | M5 | dsh-orca-hero-mark | 中文命名从「初始页图标」改为「首页图标」，并统一该插件里对那张页面的称呼（README、package.json、locale、`client.js`、`cordis.patch.yml` 共 10 处）；「初始页前的鲸鱼图标」一并改为「首页的鲸鱼图标」。英文保持 `Hero Mark`（DSH 槽位原名）。对应关闭 Q3 | 2026-11-04 | 已改，`node --check` ＋ JSON 通过；需重开 Orca 才生效 | `client.js:39`、`locale/zh.json:3-4`、`package.json:5`、`README.md`、`cordis.patch.yml:1` |
 | M6 | 文档（markdown 滥用） | 定规则：加粗只留在列表项标签或句首；句中强调、表格单元格里的加粗、UI 路径上的加粗一律拆掉。顺带修掉去粗体后残留的「在 设置 → 通用 里」空格，以及本台账里把 `dawn` / `main` / `moon` 用竖线连写、撑破表格单元格的写法。9 个插件 README + Orca README + 本台账的表格列数与标题层级全部校验一致 | 2026-11-04 | 已改，加粗 span 数：dsh-app-icon 29 → 13、dsh-theme-rose-pine 33 → 10、dsh-balance-pill 19 → 15、dsh-orca-titlebar 2 → 0、dsh-orca-hero-mark 保持 1（唯一的列表标签）；脚本只碰正文，代码块与行内代码原样 | 8 个 README + 本台账 |
+| M7 | 两仓提交 | dotfiles 四个 commit：`cd326e2` 五插件并入 dsh-patch + 图标引擎拆到 dsh-icons（260 文件，+28.6k / −25.3k）、`79a8a67` dsh-skill-manager 入库（5 文件）、`a992d5f` 插件软引用官方 UI 包 + 自绘兜底（app-icon 到 1.0.1、hero-mark 卸载时移走自己的样式表）、`bfce87b` 文案与 README。Orca 两个 commit：`56f6081` 代码（语言切换 + 此前未提交的启动/图标链路收尾，32 文件）、`3b9a734` 文档（台账 + README + 截图）。dotfiles 里的 `dsh-commandcode-provider` 是独立仓库（自带 origin 与 tag），没有并入 | 2026-11-04 | 已改，两仓 `git status` 干净（只剩那个独立仓库自己的改动未动） | `git log` 两仓 |
 
 ---
 
@@ -68,22 +70,31 @@
 | P6 | `dsh-patch/legacy/*.json`（4 个） | 2026-11-04 | 5 个已合并插件的历史状态快照，留档供迁移比对，不删 | `dsh-patch/legacy/` |
 | P7 | `src/` 与 `lib/`、根 `client.js` 并存 | 2026-11-04 | 源码 + 发布产物，属正常形态（`dsh-icons`、`dsh-theme-rose-pine`、`dsh-patch` 各有自研构建），不算重复文件 | 各插件 `package.json` `exports` |
 | P8 | `.DS_Store` 是否混进版本库 | 2026-11-04 | 没有：dotfiles 已忽略且 0 个被跟踪（`dsh-patch/snippets/.DS_Store` 也是未跟踪状态） | `~/.dotfiles/.gitignore:9,95`、`git ls-files` |
+| P9 | 9 个插件 `package.json` 三种形态（`main` 有 `index.js` / `lib/index.js` / `src/index.js`，`exports` 有对象与裸字符串两种写法，`dsh.client` 有的缺 `platform` / `immediately`） | 2026-11-04 | 逐一核过：**所有 `main` / `exports` 指向的文件都存在**（唯一的「缺失」是 `./locale/*.json` 这条 glob 通配，不是文件）；三种 `main` 分别对应「无构建 / 自研构建 / src 即产物」三种合法形态；`platform` 与 `immediately` 缺省时宿主按默认走，`dsh-patch` 与 `dsh-skill-manager` 今天在跑的 profile 里就是这两项都缺的状态，改动只会换来一次 `pnpm install` + 重启和加载时机的风险。**统一纯属装饰，不做** | 逐插件审计脚本输出；`~/.dotfiles/.dsh/profiles/web/package.json` |
+| P10 | `dsh-patch` 的 open-in-app 主按钮同时带 `title` 与 `aria-label`（值相同） | 2026-11-04 | 有意：主按钮是纯图标，`title` 是 rose-pine 自绘气泡提示的**输入源**（无主题时才回落系统 tooltip），`aria-label` 负责无障碍。删 `title` 会把气泡一起删掉，不是「又一处原生 title 滥用」 | `src/client/dropdown.ts:513-516`、`README.md`（菜单小节） |
+
+### 3.3 分析器（跑过，结论明确）
+
+| 编号 | 项 | 检查时间 | 结论 | 依据 |
+| --- | --- | --- | --- | --- |
+| A1 | 插件重复度（jscpd） | 2026-11-04 | `dsh-patch/src` 128 个文件 / 23497 行，重复率 **0.09%**（唯一一处：`client/host-open.ts` 与 `client/custom-code/host-open.ts` 共 22 行，189 token）。两份语义不同——共享版还管「复制到剪贴板」，custom-code 版只「真打开」——**不合并**，合并等于给两条路径做行为求交 | `npx jscpd@3 --min-tokens 120 --format typescript src`（v4 会扫到 0 个文件，用 v3） |
+| A2 | Orca 的 swiftlint | 2026-11-04 | **跑不起来**：swiftlint 0.65.1 加载 `sourcekitdInProc.framework` 失败（Homebrew 装的二进制与本机 CommandLineTools / Xcode 26 工具链不匹配），与代码无关。要用得先修工具链，或在 Xcode 里跑 | `swiftlint lint` 报 `Loading sourcekitdInProc.framework ... failed` |
+| A3 | knip / 未用导出 | 2026-11-04 | 未跑：本机没有，`npx` 装一份对这个仓库意义有限——插件是自研单 bundle，导出名被宿主的字符串消费，误报密度高。真要做得先写一份 `knip.json` 白名单，投入产出比不高 | `which knip` 为空 |
 
 ---
 
 ## 4. 待办（该改，尚未动）
 
-按「先低风险后重构」排序；每项都带依据，动手时不必重新定位。已关闭的 T3、T4、T5、T6、T7、T10 见 §2
-（M2 / M3 / M4 与 dsh-tidy 文件地图重写），这里不再保留。
+按「先低风险后重构」排序；每项都带依据，动手时不必重新定位。已关闭的项与去向：
+
+- T3 / T4 / T5 / T6 / T7 / T10 → §2 的 M2 / M3 / M4，以及 dsh-tidy 文件地图重写；
+- T1 / T2 → §2 的 M7（两仓已提交，dotfiles 四个 commit、Orca 两个）；
+- T8 / T9 → §3 的 P9 / P10（核完是「有意，不做」）；
+- T11 → §3.3（jscpd 0.09%，swiftlint 工具链坏了，knip 未装）。
 
 | 编号 | 范围 | 事项 | 检查时间 | 状态 | 依据 |
 | --- | --- | --- | --- | --- | --- |
-| T1 | Orca + dotfiles | 两仓都停在半提交状态：Orca 28 个改动 + 2 个新文件未提交；dotfiles 里 `dsh-bridge`/`dsh-copycode`/`dsh-custom-code` 的删除未提交，`dsh-orca-titlebar`（自绘分段控件兜底）、`dsh-app-icon`、`dsh-balance-pill` 也各带未提交改动，而 `dsh-patch` README 已写「五个原插件已删除」——文档超前于仓库。建议按主题分批提交（本轮 M1–M6 都叠在这些未提交改动上） | 2026-11-04 | 待办 | `git status` 两仓 |
-| T2 | 插件 | `dsh-icons`、`dsh-skill-manager`、`dsh-commandcode-provider` 三个目录 0 个被跟踪文件，`dsh-patch` 另有 40 条未跟踪 —— 等于这三个插件没有版本备份 | 2026-11-04 | 待办 | `git ls-files` 逐目录统计 |
-| T8 | 插件 | `package.json` 形态三种：`main` 有 `index.js` / `./lib/index.js` / `src/index.js`；`exports` 有 `{".":{"default":…}}` 与裸字符串（`dsh-skill-manager`）；`dsh.client` 有的缺 `platform`/`immediately`（`dsh-patch`、`dsh-skill-manager`）。改这个要 `pnpm install` + 重启，先定一套标准再统一 | 2026-11-04 | 待办 | 9 个 `package.json` |
-| T9 | dsh-patch | README 明确写「主按钮带 `title`，rose-pine 渲染成 title-tip、换主题回落系统 tooltip」——与「按钮不要原生 title 悬停提示」的既有偏好存在张力。若主按钮是纯图标则 `title` 可接受（但更好是 `aria-label` + 自绘提示），需确认口径 | 2026-11-04 | 待办 | `dsh-patch/README.md`（菜单小节） |
-| T11 | 全范围 | 未跑重型分析器（jscpd / knip / madge）。插件是自研单 bundle 构建、导出名被宿主字符串消费，误报密度高；Orca 是 Swift，更适合 swiftlint。要做就分开做：插件先 knip 只看 `src/`，Orca 先 swiftlint | 2026-11-04 | 待办（未执行） | — |
-| T12 | Orca 设置面板 | 英文界面只过了编译，没在真机上量过：`labelColumnWidth` 96 是照中文标签调的，英文最长标签是 `Keep the local service running after Orca quits`（这行是 checkbox，不受列宽影响）与 `dsh command`（短），风险在语言行 hint 的换行与面板高度 500 是否够 | 2026-11-04 | 待办（需起 Orca 实测） | `SettingsWindowController.swift`（`Self.labelColumnWidth`、`contentRect`） |
+| T12 | Orca 设置面板 | 英文界面只过了编译，没在真机上量过：`labelColumnWidth` 96 是照中文标签调的，英文最长的几个标签是 checkbox 的整句（不受列宽影响），风险在语言行 hint 的换行与面板高度 500 是否够。**Orca 正开着（pid 77901 + dsh 子进程），装新构建要重开，这步留给你** | 2026-11-04 | 待办（需你重开 Orca 后看） | `SettingsWindowController.swift`（`Self.labelColumnWidth`、`contentRect`） |
 
 ---
 
