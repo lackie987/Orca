@@ -60,10 +60,11 @@ enum AppIcon {
             guard isDark else { return "dawn" }
             return preset == "dawn" ? "main" : preset
         case .theme:
-            // A pinned page theme answers both appearances with the reported variant; a page that
-            // follows the Mac answers for the side it is currently painting, so the other side is
-            // derived instead of being read.
-            if !pageFollowsSystem(preferences) || isDark == systemIsDark {
+            // A pinned page theme answers both appearances with the reported variant — and so does a
+            // page painting a plane the Mac contradicts, since it will not repaint on the next flip.
+            // A page that does follow the Mac answers only for the side it is painting.
+            if !pageFollowsSystem(preferences) || pagePinsItsPlane(preferences)
+                || isDark == systemIsDark {
                 let reported = preferences.appIconThemeVariant
                 if themed.contains(reported) { return reported }
                 if let base = ColorHex.color(preferences.splashBaseColor), ColorHex.isDark(base) {
@@ -85,6 +86,17 @@ enum AppIcon {
         case "light", "dark": false
         default: true
         }
+    }
+
+    /// Whether the page is painting a plane the Mac contradicts.
+    ///
+    /// Only a theme pinned to one plane does that — a light variant on a dark Mac, say — and it will
+    /// not repaint on the next flip, so its own report answers both appearances rather than just the
+    /// one it is painting. Nothing here distinguishes that from a page that has not caught up yet:
+    /// the next report moves the answer, and a stale answer is worse than a brief one.
+    static func pagePinsItsPlane(_ preferences: Preferences) -> Bool {
+        guard let live = ColorHex.color(preferences.splashBaseColor) else { return false }
+        return ColorHex.isDark(live) != systemIsDark
     }
 
     /// The composed icon to show, or `nil` when no artwork is available and the bundled icon
@@ -220,11 +232,10 @@ enum AppIcon {
             return ColorHex.color(systemDarkBackground) ?? .windowBackgroundColor
         case .theme:
             let live = ColorHex.color(preferences.splashBaseColor)
-            // A page painting a plane the Mac contradicts is pinned to it, so its own base answers
-            // both appearances; otherwise only the side it is not painting has to be recalled,
-            // which is what keeps the background agent's copy the same colour.
-            let pinned = live.map { ColorHex.isDark($0) != systemIsDark } ?? false
-            if let live, pinned || isDark == systemIsDark { return live }
+            // The appearance the page is painting is answered by that very base, and a page pinned
+            // to a plane the Mac contradicts answers both. Only the side it is not painting has to
+            // be recalled, which is what keeps the background agent's copy the same colour.
+            if let live, pagePinsItsPlane(preferences) || isDark == systemIsDark { return live }
             if pageFollowsSystem(preferences),
                let side = ColorHex.color(preferences.splashBaseColor(forDark: isDark)) {
                 return side
