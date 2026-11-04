@@ -15,6 +15,7 @@ DeepSeek Harness 的原生 macOS 外壳。Swift + AppKit + WKWebView，无 Elect
 - **应用图标**：六个预设加自选图片；统一合成到 Apple 图标网格，写入 bundle 并重新签名。
 - **Web Inspector**：使用 WebKit 自带检查器，独立窗口，不 dock；支持 F12、⌥⌘I 与元素拾取。
 - **两套设置**：⌘, 打开页面自己的 DSH 设置；⌥⌘, 打开壳的服务参数面板，互不抢键。
+- **界面语言**：壳自己画的部分（菜单、设置面板、启动页、提示）默认中文，可在 ⌥⌘, 里切到 English，切完菜单立即重建；页面语言仍归 DSH 管。
 
 ## 构建
 
@@ -69,7 +70,7 @@ ORCA_SIGN_IDENTITY="Developer ID Application: …" \
 ORCA_INSTALLER_IDENTITY="Developer ID Installer: …" ./package.sh
 ```
 
-当前二进制为 **arm64 only**。通用包需要完整 Xcode（`swift build --arch arm64 --arch x86_64`），仅装 CommandLineTools 会失败。
+当前二进制为 arm64 only。通用包需要完整 Xcode（`swift build --arch arm64 --arch x86_64`），仅装 CommandLineTools 会失败。
 
 ## 启动与交接
 
@@ -99,7 +100,7 @@ sequenceDiagram
 
 复用的服务没有子进程可监听，壳每 2 秒检查进程与端口：连续 3 次失联判定死亡，自动重启一次（新 token，页面按新地址重载），再死就回到启动页。
 
-因此，**改端口偏好不会立刻生效**：只要旧服务还活着就会被复用，需要重启服务或等旧服务退出。
+因此，改端口偏好不会立刻生效：只要旧服务还活着就会被复用，需要重启服务或等旧服务退出。
 
 ## 窗口与主题
 
@@ -151,17 +152,18 @@ Orca 原生设置面板与启动页共用同一套视觉：角色标 + Orca / De
 | 面板 | 快捷键 | 管什么 |
 | --- | --- | --- |
 | DSH 设置 | ⌘, | 主题、插件、账户、快捷键、图标 |
-| Orca 设置 | ⌥⌘, | 壳自己的服务参数 |
+| Orca 设置 | ⌥⌘, | 壳自己的服务参数与界面语言 |
 
-Orca 设置的字段：
+Orca 设置的字段（面板跟随界面语言，下面是中文默认；切到 English 后对应 Port / Profile / dsh command 等）：
 
 | 项 | 默认 | 说明 |
 | --- | --- | --- |
-| Port | `4319` | `0` 表示自动挑空闲端口 |
-| Profile | `web` | `dsh` 启动的 profile |
-| dsh command | `dsh` | PATH 名或绝对路径；GUI 进程会自动补常见 PATH 目录 |
-| Keep the local service running after Orca quits | 关 | 退出后保留服务 |
-| Disable English autocorrect & autocomplete | 开 | 关闭页面文本框的自动纠错、补全、拼写检查与首字母大写 |
+| 端口 | `4319` | `0` 表示自动挑空闲端口 |
+| 配置 | `web` | `dsh` 启动的 profile |
+| dsh 命令 | `dsh` | PATH 名或绝对路径；GUI 进程会自动补常见 PATH 目录 |
+| 退出 Orca 后保留本地服务 | 关 | 退出后保留服务 |
+| 关闭输入辅助 | 开 | 关掉页面文本框的自动纠错、补全、拼写检查与首字母大写 |
+| 界面语言 | 中文 | 中文 / English，只影响壳自己画的部分 |
 
 改 Port / Profile / command 会重启服务。各插件写在磁盘上的配置不受影响；切端口后页面 origin 的 localStorage 目前从空存储开始（迁移的抓取端尚未接入）。
 
@@ -200,7 +202,7 @@ agent 的安装只在 `build.sh` 里做：bundle 里的 plist 模板（`Contents
 
 ## 开发者工具
 
-F12 或 ⌥⌘I 打开 WebKit 自带 Web Inspector（Elements / Console / Sources / Network / Timelines / Storage），**只在独立窗口打开，从不 dock**。壳在进程内把 `_WKInspector` 的 `attach` 换成 `detach`，并每秒兜底一次，连右键「检查元素」也只会落在独立窗口。
+F12 或 ⌥⌘I 打开 WebKit 自带 Web Inspector（Elements / Console / Sources / Network / Timelines / Storage），只在独立窗口打开，从不 dock。壳在进程内把 `_WKInspector` 的 `attach` 换成 `detach`，并每秒兜底一次，连右键「检查元素」也只会落在独立窗口。
 
 元素拾取：⌘⇧C 打开检查器并进入拾取，页面里悬停高亮、点击选中；再按 ⌘⇧C 或 Esc 停止。页面窗口里的 Esc 先停拾取再关检查器，检查器窗口里的 Esc 只停拾取。
 
@@ -234,6 +236,10 @@ docs/screenshot.png   README 截图
 build.sh              编译 + 组装 + 安装
 package.sh            DMG / PKG（dist/ + SHA-256）
 ```
+
+## 整理记录
+
+`docs/tidy-ledger.md` 是这仓库和自养插件的整理台账：写清了哪些项已经查过且有结论（不用再查第二遍）、哪些是待办、哪些要人定口径。动整理之前先读它的 §3。
 
 ## 设计取舍
 
