@@ -18,12 +18,19 @@ SIGN_IDENTITY="${ORCA_SIGN_IDENTITY:--}"
 # shellcheck disable=SC2086 # intentional word splitting
 echo "▸ Compiling $APP_NAME"
 swift build -c release --package-path "$DIR" ${ORCA_SWIFT_FLAGS:-}
-BIN="$(swift build -c release --package-path "$DIR" ${ORCA_SWIFT_FLAGS:-} --show-bin-path)/$APP_NAME"
+BIN_DIR="$(swift build -c release --package-path "$DIR" ${ORCA_SWIFT_FLAGS:-} --show-bin-path)"
+BIN="$BIN_DIR/$APP_NAME"
+SYNC_BIN="$BIN_DIR/orca-icon-sync"
 
 echo "▸ Assembling bundle"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
+# Keep the background icon-sync helper beside the main binary so the LaunchAgent
+# can reach it without a separate install step.
+if [ -f "$SYNC_BIN" ]; then
+  cp "$SYNC_BIN" "$APP/Contents/MacOS/orca-icon-sync"
+fi
 # The running app writes the chosen icon preset into the installed bundle's AppIcon.icns, so a
 # rebuild would otherwise reset the visible icon to the repo default until the app launches again.
 # Carry the installed icon over whenever it differs from the shipped one.
@@ -59,7 +66,33 @@ if [ "${1:-}" = "--no-install" ]; then
 fi
 
 echo "▸ Installing to $INSTALL_DIR"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 rm -rf "$INSTALL_DIR/$APP_NAME.app"
 ditto "$APP" "$INSTALL_DIR/$APP_NAME.app"
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$INSTALL_DIR/$APP_NAME.app" >/dev/null 2>&1 || true
+"$LSREGISTER" -f "$INSTALL_DIR/$APP_NAME.app" >/dev/null 2>&1 || true
+# The assembled copy carries the same bundle id, so leaving it behind hands LaunchServices a second
+# "Orca" holding a build-time snapshot of the icon: Finder, Spotlight and the Dock may draw that one.
+"$LSREGISTER" -u "$APP" >/dev/null 2>&1 || true
+rm -rf "$APP"
+
+# Install and load the per-user LaunchAgent that keeps the Dock/ Finder icon in
+# step with the saved app-icon setting while Orca is not running.
+echo "▸ Installing LaunchAgent (icon auto-sync)"
+PLIST_SRC="$DIR/Resources/com.xu.orca.icon-sync.plist"
+PLIST_DST="$HOME/Library/LaunchAgents/com.xu.orca.icon-sync.plist"
+if [ -f "$PLIST_SRC" ]; then
+  sed -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" -e "s|__HOME__|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
+  # Reload rather than load: launchd keeps the definition it was bootstrapped with, so a plist that
+  # changed (KeepAlive instead of StartInterval, say) only takes effect after a bootout.
+  launchctl bootout "gui/$(id -u)/com.xu.orca.icon-sync" 2>/dev/null || true
+  # `bootstrap` races the teardown and fails with a bare I/O error, which `|| true` used to swallow:
+  # the agent then stayed unloaded until the next build. Wait for the label to leave the domain.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    launchctl print "gui/$(id -u)/com.xu.orca.icon-sync" >/dev/null 2>&1 || break
+    sleep 0.3
+  done
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_DST" 2>/dev/null \
+    || echo "⚠️  LaunchAgent not loaded; run: launchctl bootstrap gui/$(id -u) $PLIST_DST"
+  echo "✅ LaunchAgent installed: $PLIST_DST"
+fi
 echo "✅ $INSTALL_DIR/$APP_NAME.app"
