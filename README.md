@@ -11,7 +11,7 @@ DeepSeek Harness 的原生 macOS 外壳。Swift + AppKit + WKWebView，无 Elect
 - **原生壳**：窗口、全屏、菜单、缩放和红绿灯由 AppKit 负责，不自绘窗口。
 - **启动与刷新**：服务就绪前显示主题启动页；重启服务、刷新页面复用同一表面；交接等页面的首帧事件，不等固定秒数。
 - **主题一致**：页面 base 同步到窗口与启动页；`NSApp.appearance` 跟随页面明暗。设置面板与启动页共用底色、角色标和透明标题栏；检查器跟随页面明暗，内部仍由 WebKit 绘制。
-- **标题栏四档**：`lightsOnly`（默认）/ `hover` / `hidden` / `shown`，页面顶部 header 可拖动窗口。
+- **标题栏三档**：`lightsOnly`（默认）/ `hover` / `hidden`，页面顶部 header 可拖动窗口。
 - **应用图标**：六个预设加自选图片；统一合成到 Apple 图标网格，写入 bundle 并重新签名。
 - **Web Inspector**：使用 WebKit 自带检查器，独立窗口，不 dock；支持 F12、⌥⌘I 与元素拾取。
 - **两套设置**：⌘, 打开页面自己的 DSH 设置；⌥⌘, 打开壳的服务参数面板，互不抢键。
@@ -111,7 +111,8 @@ sequenceDiagram
 | `lightsOnly`（默认） | 真灯常显，页面全幅 |
 | `hover` | 隐藏，指针进入顶部 28pt 才淡入 |
 | `hidden` | 完全隐藏 |
-| `shown` | 回到标准 `.titled` 窗口 |
+
+旧版本还有第四档 `shown`（回到标准 `.titled` 窗口），2026-11-04 删掉了：三个档位已覆盖页面画出的所有布局。存过 `shown` 的偏好会按默认档（`lightsOnly`）解析。
 
 页面 header 是拖拽区（高度按页面实测上报，兜底 40px），点按先交给网页。⌘W 关闭窗口但不退出应用；⌘Q 退出并停止服务，设置里开启「退出后保留服务」时除外。
 

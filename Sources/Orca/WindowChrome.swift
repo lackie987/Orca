@@ -24,8 +24,6 @@ final class WindowChrome {
     private var hideLightsWorkItem: DispatchWorkItem?
     /// Frames AppKit gave the buttons before any drop, so the offset never accumulates.
     private var lightsBaseline: [NSRect] = []
-    /// The drop only makes sense while the page draws the title strip; a real titlebar owns the row.
-    private var usesWebTitleStrip = true
 
     init(window: NSWindow) {
         self.window = window
@@ -35,20 +33,13 @@ final class WindowChrome {
     func apply(_ raw: String) {
         switch TitleBarMode.parse(raw) {
         case .hidden:
-            usesWebTitleStrip = true
-            setChrome(transparent: true, lightsHidden: true)
+            setChrome(lightsHidden: true)
             disableHover()
         case .hover:
-            usesWebTitleStrip = true
-            setChrome(transparent: true, lightsHidden: true)
+            setChrome(lightsHidden: true)
             enableHover()
         case .lightsOnly:
-            usesWebTitleStrip = true
-            setChrome(transparent: true, lightsHidden: false)
-            disableHover()
-        case .shown:
-            usesWebTitleStrip = false
-            setChrome(transparent: false, lightsHidden: false)
+            setChrome(lightsHidden: false)
             disableHover()
         }
         alignTrafficLights()
@@ -61,10 +52,6 @@ final class WindowChrome {
     /// Moves the traffic lights onto the page's header row. Safe to call after any AppKit layout
     /// pass: the buttons are placed from the captured baseline, never from their current frame.
     func alignTrafficLights() {
-        guard usesWebTitleStrip else {
-            restoreLightsBaseline()
-            return
-        }
         let buttons = trafficLights
         guard let parent = buttons.first?.superview,
               !buttons.isEmpty,
@@ -83,20 +70,12 @@ final class WindowChrome {
         }
     }
 
-    /// Returns the buttons to where AppKit put them, for the standard-titlebar preset.
-    private func restoreLightsBaseline() {
-        guard !lightsBaseline.isEmpty else { return }
-        for (button, baseline) in zip(trafficLights, lightsBaseline) where button.frame != baseline {
-            button.frame = baseline
-        }
-    }
-
-    /// Sets window chrome. The desktop page reserves its own sidebar title strip, so the web view
-    /// stays full-height instead of being inset a second time.
-    private func setChrome(transparent: Bool, lightsHidden: Bool) {
-        window.titleVisibility = transparent ? .hidden : .visible
-        window.titlebarAppearsTransparent = transparent
-        window.titlebarSeparatorStyle = transparent ? .none : .automatic
+    /// Keeps the page's own desktop title strip: no visible title, no separator, and the web view
+    /// at full height instead of being inset a second time.
+    private func setChrome(lightsHidden: Bool) {
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
         setLightsHidden(lightsHidden)
         window.contentView?.additionalSafeAreaInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
     }
