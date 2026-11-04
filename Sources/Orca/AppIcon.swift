@@ -43,45 +43,120 @@ enum AppIcon {
         preferences.appIconPreset == "template" || themed.contains(preferences.appIconPreset)
     }
 
-    /// The variant actually displayed for the saved preset.
+    /// The variant actually displayed for the saved preset in one appearance.
     ///
-    /// `none` keeps the chosen variant; `system` uses the Mac's appearance; `theme` uses the
-    /// page-theme variant the bridge last reported, falling back to the page base's darkness.
-    /// A `dawn` preset has no dark counterpart, so a dark plane falls back to `main`.
-    static func resolvedVariant(_ preferences: Preferences) -> String {
+    /// `none` keeps the chosen variant; `system` uses that appearance; `theme` uses the page-theme
+    /// variant the bridge last reported, falling back to the page base's darkness. The page only
+    /// answers for the appearance it is painting, so when its theme source follows the Mac the other
+    /// appearance is derived from the preset (a `dawn` preset has no dark counterpart, so a dark
+    /// plane falls back to `main`).
+    static func resolvedVariant(_ preferences: Preferences, isDark: Bool = systemIsDark) -> String {
         let preset = preferences.appIconPreset
         guard themed.contains(preset) else { return "orca" }
         switch followMode(preferences) {
         case .none:
             return preset
         case .system:
-            guard systemIsDark else { return "dawn" }
+            guard isDark else { return "dawn" }
             return preset == "dawn" ? "main" : preset
         case .theme:
-            let reported = preferences.appIconThemeVariant
-            if themed.contains(reported) { return reported }
-            if let base = ColorHex.color(preferences.splashBaseColor), ColorHex.isDark(base) {
-                return preset == "dawn" ? "main" : preset
+            // A pinned page theme answers both appearances with the reported variant; a page that
+            // follows the Mac answers for the side it is currently painting, so the other side is
+            // derived instead of being read.
+            if !pageFollowsSystem(preferences) || isDark == systemIsDark {
+                let reported = preferences.appIconThemeVariant
+                if themed.contains(reported) { return reported }
+                if let base = ColorHex.color(preferences.splashBaseColor), ColorHex.isDark(base) {
+                    return preset == "dawn" ? "main" : preset
+                }
+                return "dawn"
             }
-            return "dawn"
+            guard isDark else { return "dawn" }
+            return preset == "dawn" ? "main" : preset
+        }
+    }
+
+    /// Whether the page theme itself follows the Mac.
+    ///
+    /// Only then does the page base flip with the system; a pinned `light` / `dark` page keeps one
+    /// plane whatever the Mac does, so the icon has nothing to follow while Orca is quit.
+    static func pageFollowsSystem(_ preferences: Preferences) -> Bool {
+        switch preferences.themeSource {
+        case "light", "dark": false
+        default: true
         }
     }
 
     /// The composed icon to show, or `nil` when no artwork is available and the bundled icon
     /// should stay in place.
+    ///
+    /// Composing is the expensive half: it rasterises a 1024px source and draws a 361-segment
+    /// squircle, and it used to run on every launch, activation, theme switch and colour-well tick,
+    /// always on the main thread. Keying one cached result on the inputs that decide it turns every
+    /// one of those after the first into a lookup.
     static func current(_ preferences: Preferences) -> NSImage? {
+        let key = signature(for: preferences)
+        cacheLock.lock()
+        if let cached = cache, cached.key == key {
+            let icon = cached.icon
+            cacheLock.unlock()
+            return icon
+        }
+        cacheLock.unlock()
+        guard let icon = compose(preferences, isDark: systemIsDark) else { return nil }
+        cacheLock.lock()
+        cache = (key, icon)
+        cacheLock.unlock()
+        return icon
+    }
+
+    /// The composed icon for one appearance, bypassing the display cache.
+    ///
+    /// Only the background agent asks for a side other than the Mac's: it pre-renders both so the
+    /// bundle can be updated while Orca is quit.
+    static func icon(_ preferences: Preferences, isDark: Bool) -> NSImage? {
+        compose(preferences, isDark: isDark)
+    }
+
+    /// Everything that decides what the composed icon looks like in one appearance.
+    ///
+    /// A `custom` icon is a file the user can replace behind Orca's back, so its modification date
+    /// belongs to the key; the other presets are fully described by the stored preferences.
+    static func signature(for preferences: Preferences, isDark: Bool = systemIsDark) -> String {
+        switch preferences.appIconPreset {
+        case "custom":
+            let changed = (try? FileManager.default.attributesOfItem(
+                atPath: AppPaths.customAppIcon.path
+            ))?[.modificationDate] as? Date
+            return "custom:" + String(changed?.timeIntervalSince1970 ?? 0)
+        case "template":
+            return "template:" + templateColorHex(preferences, isDark: isDark)
+        default:
+            return preferences.appIconPreset + ":" + resolvedVariant(preferences, isDark: isDark)
+        }
+    }
+
+    /// Composes the icon from scratch: the uncached half of `current`.
+    private static func compose(_ preferences: Preferences, isDark: Bool) -> NSImage? {
         if preferences.appIconPreset == "custom",
            let saved = NSImage(contentsOf: AppPaths.customAppIcon) {
             // Already composed when it was picked; reuse it verbatim instead of shrinking it again.
             return saved
         }
         if preferences.appIconPreset == "template", let artwork = templateImage {
-            return IconProcessor.template(artwork: artwork, background: templateColor(preferences))
+            return IconProcessor.template(
+                artwork: artwork, background: templateColor(preferences, isDark: isDark)
+            )
         }
-        let variant = resolvedVariant(preferences)
+        let variant = resolvedVariant(preferences, isDark: isDark)
         guard let artwork = artwork(variant) else { return nil }
         return IconProcessor.icon(from: artwork)
     }
+
+    /// The last composed icon and the signature it was built from. Guarded by `cacheLock` because
+    /// the colour-well path composes off the main thread.
+    private static var cache: (key: String, icon: NSImage)?
+    private static let cacheLock = NSLock()
 
     /// The transparent character mark the startup surface draws.
     ///
@@ -131,28 +206,41 @@ enum AppIcon {
         ThemeColor.systemIsDark
     }
 
-    /// Background colour for the template icon.
+    /// Background colour for the template icon in one appearance.
     ///
     /// `none` keeps the chosen colour, `theme` takes the page's published base, and `system` picks
     /// the icon's own light/dark plane from the Mac. The page theme never leaks into system mode.
-    static func templateColor(_ preferences: Preferences) -> NSColor {
+    /// `theme` answers the appearance the page is painting with that very base: a remembered
+    /// per-side colour is only a stand-in for a side the page has not painted, and preferring it
+    /// made a light theme on a dark Mac draw the dark plane until the theme itself changed.
+    static func templateColor(_ preferences: Preferences, isDark: Bool = systemIsDark) -> NSColor {
         switch followMode(preferences) {
         case .none:
             if let color = ColorHex.color(preferences.appIconTemplateColor) { return color }
             return ColorHex.color(systemDarkBackground) ?? .windowBackgroundColor
         case .theme:
-            if let color = ColorHex.color(preferences.splashBaseColor) { return color }
-            let hex = systemIsDark ? systemDarkBackground : systemLightBackground
+            let live = ColorHex.color(preferences.splashBaseColor)
+            // A page painting a plane the Mac contradicts is pinned to it, so its own base answers
+            // both appearances; otherwise only the side it is not painting has to be recalled,
+            // which is what keeps the background agent's copy the same colour.
+            let pinned = live.map { ColorHex.isDark($0) != systemIsDark } ?? false
+            if let live, pinned || isDark == systemIsDark { return live }
+            if pageFollowsSystem(preferences),
+               let side = ColorHex.color(preferences.splashBaseColor(forDark: isDark)) {
+                return side
+            }
+            if let live { return live }
+            let hex = isDark ? systemDarkBackground : systemLightBackground
             return ColorHex.color(hex) ?? .windowBackgroundColor
         case .system:
-            let hex = systemIsDark ? systemDarkBackground : systemLightBackground
+            let hex = isDark ? systemDarkBackground : systemLightBackground
             return ColorHex.color(hex) ?? .windowBackgroundColor
         }
     }
 
     /// The template colour as `#rrggbb`, for the settings row's colour well.
-    static func templateColorHex(_ preferences: Preferences) -> String {
-        ColorHex.string(templateColor(preferences)) ?? "#232136"
+    static func templateColorHex(_ preferences: Preferences, isDark: Bool = systemIsDark) -> String {
+        ColorHex.string(templateColor(preferences, isDark: isDark)) ?? "#232136"
     }
 
     /// The template's own fixed colour, independent of the follow mode. The settings row's colour
