@@ -51,17 +51,45 @@ enum AppBundleSeal {
         DispatchQueue.main.asyncAfter(deadline: .now() + quietPeriod, execute: work)
     }
 
-    /// Applies an outstanding signature before the process goes away.
+    /// Applies an outstanding signature off the main thread, then calls back on the main queue.
     ///
-    /// Nothing to do when the last write was already sealed, which is the common case: an icon
-    /// chosen minutes ago is sealed long before the user quits.
-    static func flush(for appPath: String) {
+    /// The synchronous variant below parked the caller on `queue.sync` for the whole `codesign` run,
+    /// with no timeout of its own: quitting right after an icon change froze the app and could be
+    /// killed by the system's termination watchdog mid-signature, which leaves the bundle half-sealed
+    /// and unlaunchable. This returns immediately and answers when the seal is done.
+    /// - Parameters:
+    ///   - appPath: the bundle whose resources changed.
+    ///   - completion: called on the main queue once the signature is applied or given up on.
+    static func flush(for appPath: String, completion: @escaping () -> Void) {
         pending?.cancel()
         pending = nil
-        guard sealed < writes else { return }
-        queue.sync { _ = runCodesign(appPath) }
-        sealed = writes
+        guard sealed < writes else {
+            completion()
+            return
+        }
+        let mark = writes
+        queue.async {
+            let ok = runCodesign(appPath)
+            DispatchQueue.main.async {
+                if ok { sealed = max(sealed, mark) }
+                completion()
+            }
+        }
     }
+
+    /// Applies an outstanding signature before the process goes away.
+    ///
+    /// Disabled in favour of the asynchronous form above: it blocks its caller for the whole run.
+    /// Kept for a caller that genuinely cannot continue until the bundle is sealed, which the app's
+    /// termination path is not — it answers `.terminateLater` instead.
+    //
+    // static func flush(for appPath: String) {
+    //     pending?.cancel()
+    //     pending = nil
+    //     guard sealed < writes else { return }
+    //     queue.sync { _ = runCodesign(appPath) }
+    //     sealed = writes
+    // }
 
     /// Re-signs the bundle ad-hoc, mirroring the identity `build.sh` applies.
     ///
@@ -91,7 +119,17 @@ enum AppBundleSeal {
             NSLog("[Orca] cannot start codesign for %@: %@", appPath, error.localizedDescription)
             return false
         }
-        process.waitUntilExit()
+        // Bounded wait: `waitUntilExit()` has no timeout, and a stuck codesign must not hold a quit
+        // open indefinitely. Thirty seconds is far past a normal re-seal of this bundle's size.
+        let deadline = Date().addingTimeInterval(30)
+        while process.isRunning && Date() < deadline {
+            usleep(20_000)
+        }
+        if process.isRunning {
+            NSLog("[Orca] codesign timed out for %@", appPath)
+            process.terminate()
+            return false
+        }
         if process.terminationStatus != 0 {
             NSLog("[Orca] codesign exited %d for %@", process.terminationStatus, appPath)
             return false

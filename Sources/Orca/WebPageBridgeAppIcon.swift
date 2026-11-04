@@ -80,7 +80,9 @@ extension WebPageController {
                     self.preferences.appIconTemplateColor = hex
                 }
                 self.preferences.appIconPreset = "template"
-                self.reapplyIcon()
+                // A dragged colour well posts a value on nearly every frame; composing per frame
+                // froze the window, so this one goes through the coalesced, off-main-thread path.
+                self.reapplyIconDebounced()
                 replyHandler(self.iconState(), nil)
             case "templateFollow":
                 let flag = (payload["follow"] as? Bool)
@@ -128,6 +130,33 @@ extension WebPageController {
     /// Applies whatever the saved preset resolves to (Dock, Finder and the bundle's icon file).
     func reapplyIcon() {
         AppIconInstaller.applyCurrent(preferences, forApp: Bundle.main.bundlePath)
+    }
+
+    /// Applies the icon after a quiet period, for writes that arrive in a stream.
+    ///
+    /// Used by the template colour well: it reports a new value on nearly every frame of a drag, and
+    /// composing per frame is a 1024px rasterisation per frame. Everything else changes once per
+    /// user action and goes through `reapplyIcon()`.
+    func reapplyIconDebounced() {
+        AppIconInstaller.applyCurrentDebounced(preferences, forApp: Bundle.main.bundlePath)
+    }
+
+    /// Hands the current state to the page after a repaint the page did not ask for.
+    ///
+    /// The settings row's preview is a snapshot from `get`; when the theme publishes a new base the
+    /// shell repaints a following icon with no page-side call involved, so without this push the
+    /// row keeps the previous plane until it is reopened. One-way on purpose — no reply handler, so
+    /// the "exactly one reply per message" rule stays untouched.
+    func pushAppIconState() {
+        let state = iconState()
+        guard JSONSerialization.isValidJSONObject(state),
+              let data = try? JSONSerialization.data(withJSONObject: state),
+              let json = String(data: data, encoding: .utf8)
+        else { return }
+        webView.evaluateJavaScript(
+            "window.__ORCA_APP_ICON_PUSH__ && window.__ORCA_APP_ICON_PUSH__(\(json));",
+            completionHandler: nil
+        )
     }
 
     /// Opens the image picker, composes the choice and switches the preset to `custom`.

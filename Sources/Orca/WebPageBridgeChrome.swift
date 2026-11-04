@@ -1,10 +1,11 @@
 import AppKit
 import WebKit
 
-/// The two bridges the page uses to dress the window: the traffic-light preset its settings row
-/// writes, and the theme base colour it publishes for the startup surface.
+/// The three bridges the page uses to dress the window: the traffic-light preset its settings row
+/// writes, the native-glass switch the background tab owns, and the theme base colour it publishes
+/// for the startup surface.
 ///
-/// Both are thin settings bridges — the shell owns the value, the page only asks for it and posts a
+/// All three are thin settings bridges — the shell owns the value, the page only asks for it and posts a
 /// new one — so they live together, one file apart from the icon and desktop bridges.
 extension WebPageController {
     /// Handles `get`/`set` requests from the `dsh-orca-titlebar` plugin bridge.
@@ -19,6 +20,29 @@ extension WebPageController {
                 guard let self else { return }
                 preferences.titleBarMode = mode
                 onTitleBarModeChange?(mode)
+            },
+            replyHandler: replyHandler
+        )
+    }
+
+    /// Handles `get`/`set` requests from the `__ORCA_GLASS__` bridge behind the `dsh-patch`
+    /// background tab.
+    ///
+    /// The shell owns the value — it is what actually hides the material and repaints the window —
+    /// so the page only reads it and posts a new one. Only `"on"` / `"off"` are accepted; anything
+    /// else is answered with the state already stored.
+    func handleGlassMessage(_ message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
+        handleSettingBridge(
+            message,
+            name: "orcaGlass",
+            field: "state",
+            current: { [weak self] in (self?.preferences.glassEnabled ?? true) ? "on" : "off" },
+            normalize: { $0 == "on" || $0 == "off" ? $0 : nil },
+            store: { [weak self] state in
+                guard let self else { return }
+                let enabled = state == "on"
+                preferences.glassEnabled = enabled
+                onGlassChange?(enabled)
             },
             replyHandler: replyHandler
         )

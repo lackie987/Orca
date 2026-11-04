@@ -46,6 +46,27 @@ extension WebPageController: WKNavigationDelegate {
         decidePolicyFor navigationResponse: WKNavigationResponse,
         decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
     ) {
+        // A 4xx/5xx from the local service is a page that will never paint: the token was minted for
+        // another process, the route is gone, or the server is half up. Letting the WebView render the
+        // bare body hid all of that behind text in the window; reporting it reaches the surface and
+        // the log instead.
+        if let http = navigationResponse.response as? HTTPURLResponse,
+           http.statusCode >= 400,
+           let url = http.url,
+           isInternal(url) {
+            decisionHandler(.cancel)
+            onPageLoadFailed?(
+                NSError(
+                    domain: "OrcaPageError",
+                    code: http.statusCode,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "the service answered HTTP \(http.statusCode) for \(url.path.isEmpty ? "/" : url.path)",
+                    ]
+                )
+            )
+            return
+        }
         decisionHandler(navigationResponse.canShowMIMEType ? .allow : .download)
     }
 
@@ -57,13 +78,18 @@ extension WebPageController: WKNavigationDelegate {
         download.delegate = self
     }
 
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        LaunchTrace.mark("committed")
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        LaunchTrace.mark("finished")
         let fullscreen = webView.window?.styleMask.contains(.fullScreen) ?? false
         applyFullscreen(fullscreen)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        onPageLoadFailed?()
+        reportLoadFailure(error)
     }
 
     func webView(
@@ -71,11 +97,28 @@ extension WebPageController: WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: Error
     ) {
-        onPageLoadFailed?()
+        reportLoadFailure(error)
+    }
+
+    /// Hands a failed load to the shell, unless the failure is a normal consequence of a decision.
+    ///
+    /// Both failure callbacks used to drop the error and release the startup surface, so the window
+    /// showed an empty page for any reason at all — and an empty page has no diagnostic value. A
+    /// navigation the shell cancelled itself (a link handed to the system browser, a load replaced by
+    /// a newer one) is not a failure and would otherwise raise the surface on every click.
+    /// - Parameter error: the error WebKit reported.
+    private func reportLoadFailure(_ error: Error) {
+        let failure = error as NSError
+        if failure.domain == "WebKitErrorDomain", failure.code == 102 { return }
+        if failure.domain == NSURLErrorDomain, failure.code == NSURLErrorCancelled { return }
+        NSLog("[orca] page load failed: %@ %ld %@", failure.domain, failure.code, failure.localizedDescription)
+        onPageLoadFailed?(error)
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        webView.reload()
+        // Recovery lives in the controller: it owns the user scripts, the loading state and the
+        // startup surface, all of which a bare `reload()` here skipped.
+        recoverWebContentProcess()
     }
 
     // MARK: - Internal URLs

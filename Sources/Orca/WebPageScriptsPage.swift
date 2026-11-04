@@ -133,40 +133,137 @@ extension WebPageScripts {
     })();
     """#
 
-    /// Strips the system auto-completion / autocorrection / spell-check "补全提示" from every input
-    /// surface inside the page — including the React-mounted chat box, which arrives long after the
-    /// initial DOM. A `MutationObserver` keeps newly inserted fields in line.
+    /// Publishes the native setting before `inputCompletion` runs at document end.
+    static func inputCompletionDefault(_ disabled: Bool) -> String {
+        let value = disabled ? "true" : "false"
+        return "(function(){try{Object.defineProperty(window,'__ORCA_INPUT_COMPLETION_DEFAULT__',{configurable:true,value:\(value)});}catch(e){}})();"
+    }
+
+    /// Strips the system auto-completion / autocorrection / spell-check hints from every text input
+    /// and rich-text editor in the page — including the React-mounted chat box, which arrives long
+    /// after the initial DOM. The native setting can turn the whole layer on or off at runtime:
+    /// `window.__ORCA_INPUT_COMPLETION__.set(false)` restores each element's previous attributes.
     static let inputCompletion = #"""
     (function () {
+      var ATTRS = [
+        ['autocomplete', 'off'],
+        ['autocorrect', 'off'],
+        ['autocapitalize', 'off'],
+        ['spellcheck', 'false']
+      ];
+      var SELECTOR = 'input, textarea, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]';
+      var NON_TEXT_INPUT_TYPES = {
+        checkbox: 1, radio: 1, button: 1, submit: 1, reset: 1, image: 1, file: 1, color: 1, range: 1, hidden: 1
+      };
+      var previous = new WeakMap();
+      var enabled = window.__ORCA_INPUT_COMPLETION_DEFAULT__ !== false;
+
+      function eligible(element) {
+        if (!element || element.nodeType !== 1) { return false; }
+        if (element.tagName === 'TEXTAREA') { return true; }
+        if (element.tagName === 'INPUT') {
+          var type = (element.getAttribute('type') || 'text').toLowerCase();
+          return NON_TEXT_INPUT_TYPES[type] !== 1;
+        }
+        return element.matches
+          ? element.matches('[contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]')
+          : false;
+      }
+
       function disable(element) {
-        if (!element || element.nodeType !== 1) { return; }
+        if (!enabled || !eligible(element)) { return; }
         try {
-          element.setAttribute('autocomplete', 'off');
-          element.setAttribute('autocorrect', 'off');
-          element.setAttribute('autocapitalize', 'off');
-          element.setAttribute('spellcheck', 'false');
+          // Re-setting an attribute to the value it already holds still invalidates style on the
+          // node, and the chat box is restyled on every keystroke. Once this element is recorded
+          // and already carries the hints, there is nothing left to write.
+          if (previous.has(element)) {
+            var settled = true;
+            for (var k = 0; k < ATTRS.length; k += 1) {
+              if (element.getAttribute(ATTRS[k][0]) !== ATTRS[k][1]) { settled = false; break; }
+            }
+            if (settled) { return; }
+          }
+          if (!previous.has(element)) {
+            var saved = {};
+            for (var i = 0; i < ATTRS.length; i += 1) {
+              saved[ATTRS[i][0]] = element.getAttribute(ATTRS[i][0]);
+            }
+            previous.set(element, saved);
+          }
+          for (var j = 0; j < ATTRS.length; j += 1) {
+            element.setAttribute(ATTRS[j][0], ATTRS[j][1]);
+          }
         } catch (error) {}
       }
-      function scan(root) {
-        var nodes = (root || document).querySelectorAll('input, textarea');
-        for (var index = 0; index < nodes.length; index += 1) { disable(nodes[index]); }
+
+      function restore(element) {
+        var saved = previous.get(element);
+        if (!saved) { return; }
+        try {
+          for (var i = 0; i < ATTRS.length; i += 1) {
+            var name = ATTRS[i][0];
+            if (saved[name] === null) {
+              element.removeAttribute(name);
+            } else {
+              element.setAttribute(name, saved[name]);
+            }
+          }
+        } catch (error) {}
+        previous.delete(element);
       }
+
+      function scan(root) {
+        if (!root) { return; }
+        if (root.nodeType === 1 && eligible(root)) { disable(root); }
+        if (root.querySelectorAll) {
+          var nodes = root.querySelectorAll(SELECTOR);
+          for (var index = 0; index < nodes.length; index += 1) { disable(nodes[index]); }
+        }
+      }
+
+      function set(next) {
+        enabled = !!next;
+        try {
+          if (enabled) { scan(document); return; }
+          var nodes = document.querySelectorAll(SELECTOR);
+          for (var index = 0; index < nodes.length; index += 1) { restore(nodes[index]); }
+        } catch (error) {}
+      }
+
       function onMutations(records) {
+        if (!enabled) { return; }
+        // One record set can name the same element more than once (a move is a removal plus an
+        // addition), and each name used to cost a subtree query of its own.
+        var seen = null;
         for (var r = 0; r < records.length; r += 1) {
-          var added = records[r].addedNodes;
+          var record = records[r];
+          if (record.type === 'attributes') {
+            disable(record.target);
+            continue;
+          }
+          var added = record.addedNodes;
           for (var n = 0; n < added.length; n += 1) {
             var node = added[n];
             if (node.nodeType !== 1) { continue; }
-            if (node.matches && node.matches('input, textarea')) { disable(node); }
-            if (node.querySelectorAll) { scan(node); }
+            if (seen === null) { seen = []; }
+            if (seen.indexOf(node) >= 0) { continue; }
+            seen.push(node);
+            scan(node);
           }
         }
       }
-      scan(document);
+
+      if (enabled) { scan(document); }
       new MutationObserver(onMutations).observe(document.documentElement, {
         childList: true,
-        subtree: true
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['contenteditable']
       });
+      window.__ORCA_INPUT_COMPLETION__ = {
+        set: set,
+        get: function () { return enabled; }
+      };
     })();
     """#
 }

@@ -8,10 +8,10 @@ import WebKit
 extension WebPageController {
     /// Wires the message channels; both groups go through weak wrappers so the web view can be freed.
     func installBridges(on userContentController: WKUserContentController) {
-        for name in ["themeSource", "titleBar", "diagnostics", "orcaPagePainted"] {
+        for name in ["themeSource", "titleBar", "diagnostics", "orcaPagePainted", "orcaBackdrop"] {
             userContentController.add(WeakScriptMessageHandler(target: self), name: name)
         }
-        for name in ["directoryPicker", "orcaTitleBar", "orcaPalette", "orcaAppIcon", "orcaDesktop"] {
+        for name in ["directoryPicker", "orcaTitleBar", "orcaPalette", "orcaGlass", "orcaAppIcon", "orcaDesktop"] {
             userContentController.addScriptMessageHandler(
                 WeakReplyScriptMessageHandler(target: self),
                 contentWorld: .page,
@@ -40,6 +40,14 @@ extension WebPageController: WKScriptMessageHandler {
             }
         case "orcaPagePainted":
             onPagePainted?()
+        case "orcaBackdrop":
+            // The page paints a backdrop that covers the window, so the material behind it would
+            // only ever be sampled and never seen. Anything malformed is read as "not covering",
+            // which keeps the material — the safe answer, since the page is then see-through.
+            guard let payload = message.body as? [String: Any],
+                  let covers = payload["covers"] as? Bool
+            else { return }
+            onPageBackdropChange?(covers)
         default:
             break
         }
@@ -57,6 +65,8 @@ extension WebPageController: WKScriptMessageHandlerWithReply {
             handleTitleBarMessage(message, replyHandler: replyHandler)
         case "orcaPalette":
             handlePaletteMessage(message, replyHandler: replyHandler)
+        case "orcaGlass":
+            handleGlassMessage(message, replyHandler: replyHandler)
         case "directoryPicker":
             handleDirectoryPicker(replyHandler: replyHandler)
         case "orcaAppIcon":

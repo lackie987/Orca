@@ -27,7 +27,7 @@ final class InspectorController {
     private static let rejectDocking: Void = {
         guard let inspectorClass = NSClassFromString("_WKInspector") else { return }
         let detachInstead: @convention(block) (AnyObject) -> Void = { inspector in
-            _ = inspector.perform(NSSelectorFromString("detach"))
+            InspectorController.sendPrivate("detach", to: inspector as? NSObject)
         }
         _ = class_replaceMethod(
             inspectorClass,
@@ -70,8 +70,53 @@ final class InspectorController {
         }
     }
 
+    // MARK: - Private API
+
+    /// Calls a private selector, but only when the target really answers it.
+    ///
+    /// Everything this controller touches on `_WKInspector` is private: WebKit can rename or drop a
+    /// selector in any release, and `perform(_:)` answers one it does not know with
+    /// `NSInvalidArgumentException` — an *uncaught* one, so the app dies on whichever keystroke
+    /// happened to reach it first. Checking first turns a vanished selector into a no-op, which is
+    /// what the "inspector did not open" alert already explains to the user.
+    ///
+    /// - Returns: whether the selector existed and was called.
+    @discardableResult
+    private static func sendPrivate(_ name: String, to target: NSObject?) -> Bool {
+        guard let target else { return false }
+        let selector = NSSelectorFromString(name)
+        guard target.responds(to: selector) else { return false }
+        _ = target.perform(selector)
+        return true
+    }
+
+    /// Reads a private property with the same guard, KVC included: `value(forKey:)` raises
+    /// `NSUndefinedKeyException` for a key the class does not carry, which is just as fatal as an
+    /// unknown selector.
+    private static func readPrivate(_ key: String, from target: NSObject?) -> Any? {
+        guard let target, canRead(key, from: target) else { return nil }
+        return target.value(forKey: key)
+    }
+
+    /// Whether `value(forKey:)` would resolve `key` on `target` rather than raise.
+    ///
+    /// KVC accepts three routes: a getter named `get<Key>`, a getter named `<key>`, or an instance
+    /// variable named `_<key>`. Testing the selectors alone is not enough — a property that is only
+    /// backed by its ivar would read as absent, and every `isVisible` check would answer `false`,
+    /// which would make the toggle open an already-open inspector instead of closing it.
+    private static func canRead(_ key: String, from target: NSObject) -> Bool {
+        let capitalized = key.prefix(1).uppercased() + key.dropFirst()
+        for name in [key, "get" + capitalized, "is" + capitalized]
+        where target.responds(to: NSSelectorFromString(name)) {
+            return true
+        }
+        let type = type(of: target)
+        return class_getInstanceVariable(type, "_" + key) != nil
+            || class_getInstanceVariable(type, key) != nil
+    }
+
     var isVisible: Bool {
-        (inspector()?.value(forKey: "isVisible") as? Bool) ?? false
+        (Self.readPrivate("isVisible", from: inspector()) as? Bool) ?? false
     }
 
     // MARK: - Commands
@@ -105,13 +150,16 @@ final class InspectorController {
             reportUnavailable()
             return
         }
-        _ = inspector.perform(NSSelectorFromString("detach"))
-        _ = inspector.perform(NSSelectorFromString(command))
+        Self.sendPrivate("detach", to: inspector)
+        Self.sendPrivate(command, to: inspector)
         // The first open of a process builds the front end before `detach()` can apply, so that
         // build can finish attached. One more call in the same turn covers it.
-        _ = inspector.perform(NSSelectorFromString("detach"))
+        Self.sendPrivate("detach", to: inspector)
         verifyVisible()
         watchForDock()
+        // The window may exist by now; the async pass covers the colder first build.
+        alignInspectorAppearance()
+        DispatchQueue.main.async { [weak self] in self?.alignInspectorAppearance() }
     }
 
     /// Keeps the panel out of the page for as long as it is open.
@@ -127,13 +175,16 @@ final class InspectorController {
                 return
             }
             guard let inspector = self.inspector(),
-                  (inspector.value(forKey: "isVisible") as? Bool) == true
+                  (Self.readPrivate("isVisible", from: inspector) as? Bool) == true
             else {
                 self.stopWatchingForDock()
                 return
             }
-            guard self.detachedWindow() == nil else { return }
-            _ = inspector.perform(NSSelectorFromString("detach"))
+            guard let window = self.detachedWindow() else {
+                Self.sendPrivate("detach", to: inspector)
+                return
+            }
+            window.appearance = NSApp.appearance
         }
         undockWatcher = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -150,6 +201,12 @@ final class InspectorController {
         return window
     }
 
+    /// Keep WebKit's own panel in the same light/dark mode as the page; its chrome and internal
+    /// layout remain WebKit's, because DevTools is a separate tool rather than a shell page.
+    private func alignInspectorAppearance() {
+        detachedWindow()?.appearance = NSApp.appearance
+    }
+
     func hide() {
         // Pressing F12 twice quickly must not look like a failure: the check belongs to the show
         // that asked for it, and hiding is a deliberate answer, not a broken inspector.
@@ -162,7 +219,7 @@ final class InspectorController {
         // crosshair and keeps capturing clicks, and the next show then drops every picker toggle, so
         // the mode can never be turned off again. Stop it while the front end still answers.
         stopPicking()
-        _ = inspector()?.perform(NSSelectorFromString("hide"))
+        Self.sendPrivate("hide", to: inspector())
     }
 
     /// ⌘⇧C is the inspector's own "Start/Stop element selection" toggle — the same mode as Safari's
@@ -192,7 +249,7 @@ final class InspectorController {
     }
 
     private func toggleElementSelection(on inspector: NSObject) {
-        _ = inspector.perform(NSSelectorFromString("toggleElementSelection"))
+        Self.sendPrivate("toggleElementSelection", to: inspector)
     }
 
     /// Applies the request in `pickerTarget` once the inspector front end can answer it.
@@ -210,7 +267,7 @@ final class InspectorController {
 
     /// Whether the page is currently in element-picking mode.
     private var isSelectionActive: Bool {
-        (inspector()?.value(forKey: "isElementSelectionActive") as? Bool) ?? false
+        (Self.readPrivate("isElementSelectionActive", from: inspector()) as? Bool) ?? false
     }
 
     /// Turns the picker off when it is on, without showing or hiding the window.
@@ -223,10 +280,14 @@ final class InspectorController {
 
     /// Runs `action` once the inspector front end is visible and loaded, or gives up after the
     /// timeout. A second request replaces the pending one so presses cannot stack duplicate toggles.
+    ///
+    /// 150 ms is the front end's own loading granularity — it reports readiness by finishing a
+    /// document load, not by a 50 ms deadline — so the denser poll only asked the same question
+    /// three times as often for the length of an inspector open.
     private func waitForFrontEnd(then action: @escaping () -> Void) {
         cancelPendingSelection()
         let deadline = Date(timeIntervalSinceNow: Self.frontEndTimeout)
-        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] timer in
+        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] timer in
             guard let self else {
                 timer.invalidate()
                 return
@@ -264,12 +325,14 @@ final class InspectorController {
     /// Whether WebKit has built and loaded the inspector UI. Visibility alone is not enough: the
     /// dock can be on screen while its front-end document is still loading.
     private func isFrontEndReady(_ inspector: NSObject) -> Bool {
-        guard let front = inspector.value(forKey: "inspectorWebView") as? WKWebView else { return false }
+        guard let front = Self.readPrivate("inspectorWebView", from: inspector) as? WKWebView else {
+            return false
+        }
         return front.url != nil && !front.isLoading
     }
 
     private func frontEnd() -> WKWebView? {
-        inspector()?.value(forKey: "inspectorWebView") as? WKWebView
+        Self.readPrivate("inspectorWebView", from: inspector()) as? WKWebView
     }
 
     /// The front end lives in its own process, so "did it open" can only be answered a moment later.
@@ -299,16 +362,10 @@ final class InspectorController {
         guard !hasReportedUnavailable else { return }
         hasReportedUnavailable = true
         let alert = NSAlert()
-        alert.messageText = "Web Inspector did not open"
-        alert.informativeText = """
-        WebKit only builds its inspector for a debuggable process. This copy of Orca is missing the \
-        com.apple.security.get-task-allow entitlement, so the inspector is a no-op.
-
-        Rebuild with ./build.sh — it signs the app with Resources/Orca.entitlements, which carries \
-        that entitlement.
-        """
+        alert.messageText = Preferences.shared.copy.alert.inspectorTitle
+        alert.informativeText = Preferences.shared.copy.alert.inspectorBody
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: Preferences.shared.copy.common.ok)
         // A sheet keeps the app responsive; runModal() would freeze the page behind the warning.
         if let window = page?.webView.window {
             alert.beginSheetModal(for: window, completionHandler: nil)

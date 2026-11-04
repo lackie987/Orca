@@ -28,62 +28,110 @@ enum PortOwner {
     /// Grace period after `SIGKILL`, only long enough to observe the socket closing.
     private static let forcedTimeout: TimeInterval = 1
 
-    /// Polling interval while waiting for the port to close.
-    private static let pollInterval: UInt32 = 100_000
+    /// First gap between release probes. A service that is going to go nearly always does within a
+    /// few milliseconds, so polling coarsely here is time added to every restart for nothing.
+    private static let initialPollInterval: UInt32 = 10_000
+
+    /// Widest gap between release probes, reached by doubling from `initialPollInterval`.
+    private static let maximumPollInterval: UInt32 = 200_000
 
     /// Resolves who holds `port`, releasing it when the holder is a leftover dsh service.
     /// - Parameter port: the configured listen port; must be greater than zero.
     /// - Returns: whether the port ended up free, reclaimed, or owned by someone else.
     static func reclaim(_ port: Int) -> Outcome {
-        guard let pid = listeningPID(port) else { return .free }
-        let command = commandLine(pid) ?? ""
-        guard isDshService(command) else { return .foreign(owner: describe(pid: pid, command: command)) }
+        guard let pid = PortListener.pid(ofListenerOn: port) else {
+            // Nothing *visible* owns it. A process belonging to another user is invisible here, so a
+            // port that still answers is answered-for rather than reported free: handing it to
+            // `dsh web` would then fail with EADDRINUSE and nothing to say which process it was.
+            guard PortProbe.isInUse(port) else { return .free }
+            return .foreign(owner: "another user’s process")
+        }
+        let argv = arguments(of: pid) ?? []
+        let command = argv.joined(separator: " ")
+        guard isDshService(argv) else { return .foreign(owner: describe(pid: pid, command: command)) }
         requestExit(pid: pid, port: port)
         return PortProbe.isInUse(port)
             ? .foreign(owner: describe(pid: pid, command: command))
             : .reclaimed(pid: pid)
     }
 
-    /// The process listening on `port`, or `nil` when the port is free.
-    /// - Parameter port: the port to look up.
-    /// - Returns: the pid of the first listener found.
-    static func listeningPID(_ port: Int) -> Int32? {
-        for path in ["/usr/sbin/lsof", "/usr/bin/lsof"] {
-            guard let text = output(of: path, arguments: ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-t"]) else {
-                continue
-            }
-            if let pid = text.split(whereSeparator: \.isNewline).first.flatMap({ Int32($0) }) {
-                return pid
-            }
+    /// The arguments of `pid`'s command line, used to recognise a dsh service.
+    /// - Parameter pid: the process to inspect.
+    /// - Returns: `argv[]`, or `nil` when it could not be read.
+    static func arguments(of pid: Int32) -> [String]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return nil }
+        let argc = Int(buffer.withUnsafeBytes { $0.load(as: Int32.self) })
+        // Layout after the count: the executable path, NUL padding up to the next word, then argv[].
+        var cursor = MemoryLayout<Int32>.size
+        while cursor < size, buffer[cursor] != 0 { cursor += 1 }
+        cursor += 1
+        while cursor < size, buffer[cursor] == 0 { cursor += 1 }
+        var arguments: [String] = []
+        while arguments.count < argc, cursor < size {
+            var finish = cursor
+            while finish < size, buffer[finish] != 0 { finish += 1 }
+            arguments.append(String(decoding: buffer[cursor..<finish].map { UInt8(bitPattern: $0) }, as: UTF8.self))
+            cursor = finish + 1
         }
-        return nil
+        return arguments.isEmpty ? nil : arguments
     }
 
-    /// The full command line of `pid`, used to recognise a dsh service.
+    /// The full command line of `pid`, used for the one-line owner label.
     /// - Parameter pid: the process to inspect.
     /// - Returns: the command line, or `nil` when it could not be read.
     static func commandLine(_ pid: Int32) -> String? {
-        for path in ["/bin/ps", "/usr/bin/ps"] {
-            if let text = output(of: path, arguments: ["-o", "command=", "-p", String(pid)]) {
-                return text
-            }
-        }
-        return nil
+        arguments(of: pid)?.joined(separator: " ")
     }
 
-    /// Whether `command` belongs to a `dsh web` service rather than an unrelated program.
+    /// Interpreters that run a script named by a later argument, so the service binary is not `argv[0]`.
+    private static let interpreters: Set<String> = ["node", "bun", "deno", "tsx", "ts-node", "env"]
+
+    /// Whether `arguments` belong to a `dsh web` service rather than an unrelated program.
     ///
-    /// Orca starts the service as `dsh --profile <name> --port <port> --no-open`, so a dsh
-    /// command line always carries both the binary and one of those launcher flags. A
-    /// `dsh web` started outside Orca (no flags at all) is still the same service holding
-    /// this profile's port, so it is reclaimable too — otherwise it would be mistaken for
-    /// a foreign owner and Orca would silently retreat to an ephemeral port.
-    /// - Parameter command: the command line to classify.
+    /// This used to run on the joined command line with `contains("dsh")`, which matched any cwd or
+    /// path that merely mentions dsh — this very repository lives at `~/Documents/dsh`, so a plain
+    /// `node server.js --port 4319` started from there was classified as a service and killed. The
+    /// script the process actually runs now decides, and the launcher flags only narrow it further.
+    /// - Parameter arguments: `argv[]` of the candidate process.
     /// - Returns: `true` when the process is a dsh service.
-    static func isDshService(_ command: String) -> Bool {
-        guard command.contains("dsh") else { return false }
-        if command.contains("--profile") || command.contains("--port") { return true }
-        return command.split(separator: " ").contains("web")
+    static func isDshService(_ arguments: [String]) -> Bool {
+        guard let script = serviceScript(arguments), isDshScript(script) else { return false }
+        if arguments.contains("--profile") || arguments.contains("--port") { return true }
+        return arguments.contains("web")
+    }
+
+    /// The script path a process runs, skipping the interpreter (and `env`) in front of it.
+    /// - Parameter arguments: `argv[]` of the candidate process.
+    /// - Returns: the script or executable the process was started with.
+    private static func serviceScript(_ arguments: [String]) -> String? {
+        var index = 0
+        // `env node …/bin/dsh` chains two interpreters; bounded so a long argv cannot walk off.
+        while index < arguments.count - 1, interpreters.contains(basename(arguments[index])) {
+            index += 1
+        }
+        return index < arguments.count ? arguments[index] : nil
+    }
+
+    /// Whether `path` names the dsh entry point, whether it is the `bin/dsh` symlink or its target.
+    /// - Parameter path: the script path from a process's argv.
+    /// - Returns: `true` when that path is dsh's own launcher.
+    private static func isDshScript(_ path: String) -> Bool {
+        if basename(path) == "dsh" { return true }
+        // A configured command may point at the resolved shim target (`…/@deepseek-ai/dsh/lib/bin.js`)
+        // instead of the symlink, so the resolved form is accepted too.
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        return basename(resolved) == "dsh" || resolved.contains("/@deepseek-ai/dsh/")
+    }
+
+    /// The last path component of `path`.
+    /// - Parameter path: a path or bare file name.
+    /// - Returns: the file name without its directories.
+    private static func basename(_ path: String) -> String {
+        (path as NSString).lastPathComponent
     }
 
     /// Asks the leftover service to exit, escalating to `SIGKILL` if it ignores `SIGTERM`.
@@ -104,9 +152,11 @@ enum PortOwner {
     /// - Returns: `true` when the port was released within the timeout.
     private static func waitForRelease(of port: Int, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
+        var interval = initialPollInterval
         while Date() < deadline {
             if !PortProbe.isInUse(port) { return true }
-            usleep(pollInterval)
+            usleep(interval)
+            interval = min(interval * 2, maximumPollInterval)
         }
         return !PortProbe.isInUse(port)
     }
@@ -123,26 +173,31 @@ enum PortOwner {
         return "pid \(pid) (\(prefix))"
     }
 
-    /// Runs one command and captures its standard output.
-    /// - Parameters:
-    ///   - path: absolute path to the executable.
-    ///   - arguments: arguments passed verbatim.
-    /// - Returns: the decoded output, or `nil` when the tool is missing or fails to launch.
-    private static func output(of path: String, arguments: [String]) -> String? {
-        guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
-    }
+    // Disabled when the pid and command-line lookups moved to `PortListener` and `KERN_PROCARGS2`:
+    // `listeningPID` and `commandLine` used to shell out to `lsof` and `ps` through this helper, and
+    // both are now in-process. Kept for the one case those two cannot cover — a socket the kernel
+    // exposes to `lsof` but not to `libproc` — which nothing has needed so far.
+    //
+    // /// Runs one command and captures its standard output.
+    // /// - Parameters:
+    // ///   - path: absolute path to the executable.
+    // ///   - arguments: arguments passed verbatim.
+    // /// - Returns: the decoded output, or `nil` when the tool is missing or fails to launch.
+    // private static func output(of path: String, arguments: [String]) -> String? {
+    //     guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
+    //     let process = Process()
+    //     process.executableURL = URL(fileURLWithPath: path)
+    //     process.arguments = arguments
+    //     let pipe = Pipe()
+    //     process.standardOutput = pipe
+    //     process.standardError = FileHandle.nullDevice
+    //     do {
+    //         try process.run()
+    //     } catch {
+    //         return nil
+    //     }
+    //     let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    //     process.waitUntilExit()
+    //     return String(decoding: data, as: UTF8.self)
+    // }
 }

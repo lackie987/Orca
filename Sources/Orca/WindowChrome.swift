@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 
 /// Window chrome driven by the `dsh-orca-titlebar` plugin: title visibility, the traffic lights and
 /// the hover band that reveals them.
@@ -46,6 +47,10 @@ final class WindowChrome {
             disableHover()
         }
         alignTrafficLights()
+        // The chrome change itself can make AppKit re-place the buttons on the next layout pass.
+        DispatchQueue.main.async { [weak self] in
+            self?.alignTrafficLights()
+        }
     }
 
     /// Moves the traffic lights onto the page's header row. Safe to call after any AppKit layout
@@ -87,10 +92,33 @@ final class WindowChrome {
         window.titleVisibility = transparent ? .hidden : .visible
         window.titlebarAppearsTransparent = transparent
         window.titlebarSeparatorStyle = transparent ? .none : .automatic
-        for button in trafficLights {
-            button.isHidden = lightsHidden
-        }
+        setLightsHidden(lightsHidden)
         window.contentView?.additionalSafeAreaInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+    }
+
+    /// Switches the lights between visible and hidden with the dissolve, so display-mode changes
+    /// and the hover band share one animation instead of popping.
+    private func setLightsHidden(_ hidden: Bool) {
+        let buttons = trafficLights
+        guard !buttons.isEmpty else { return }
+        hideLightsWorkItem?.cancel()
+        hideLightsWorkItem = nil
+        if hidden {
+            guard buttons.contains(where: { !$0.isHidden }) else { return }
+            Self.dissolve(buttons, to: 0) {
+                for button in buttons {
+                    button.isHidden = true
+                }
+            }
+        } else {
+            guard buttons.contains(where: { $0.isHidden || $0.alphaValue < 0.99 }) else { return }
+            cancelLightsFade()
+            for button in buttons {
+                button.alphaValue = 0
+                button.isHidden = false
+            }
+            Self.dissolve(buttons, to: 1)
+        }
     }
 
     /// The three standard buttons, in close / minimise / zoom order.
@@ -126,38 +154,127 @@ final class WindowChrome {
         hoverBand = nil
         hideLightsWorkItem?.cancel()
         hideLightsWorkItem = nil
+        cancelLightsFade()
     }
 
-    /// Shows or hides the traffic lights with a short fade; exits are delayed before fading so the
-    /// pointer can travel from the band onto a button without the lights vanishing underneath it.
+    /// Shows or hides the traffic lights with the shared dissolve; exits are delayed before fading
+    /// so the pointer can travel from the band onto a button without the lights vanishing
+    /// underneath it.
     private func showLights(_ visible: Bool) {
         hideLightsWorkItem?.cancel()
         hideLightsWorkItem = nil
-        let buttons = trafficLights
         if visible {
-            for button in buttons {
-                button.alphaValue = 0
-                button.isHidden = false
+            setLightsHidden(false)
+            // Hover mode hides the buttons before the first alignment and AppKit only places them
+            // when they are shown again, so align here or they appear at the native titlebar row
+            // instead of the page's. A next-runloop pass covers AppKit placing them asynchronously
+            // after the visibility change.
+            alignTrafficLights()
+            DispatchQueue.main.async { [weak self] in
+                self?.alignTrafficLights()
             }
-            Self.fade(buttons, to: 1)
         } else {
-            let item = DispatchWorkItem {
-                Self.fade(buttons, to: 0) {
-                    for button in buttons {
-                        button.isHidden = true
-                    }
-                }
+            let item = DispatchWorkItem { [weak self] in
+                self?.fadeOutLights()
             }
             hideLightsWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: item)
         }
     }
 
-    /// Fades the given buttons as one group, running `completion` after the animation ends.
+    // MARK: - Exit fade
+
+    /// How long the lights take to leave once the pointer has gone.
+    private static let lightsFadeOutDuration: TimeInterval = 0.35
+
+    /// Frame-stepped exit fade; nil when none is running.
+    private var lightsFadeTimer: Timer?
+    private var lightsFadeStarted: CFTimeInterval = 0
+    private var lightsFadeFrom: CGFloat = 1
+
+    /// Fades the lights out and hides them when the fade lands.
+    ///
+    /// `dissolve` cannot do this one: measured in this window, `animator().alphaValue = 0` is
+    /// written in the first frame while the animation group still holds for its full duration —
+    /// 1.00 → 0.00 inside one 50ms sample — so the exit reads as a cut. Stepping `alphaValue` from
+    /// a timer is the only form AppKit honours here. The reveal keeps `dissolve`: it is short
+    /// enough that the jump is not visible, and it stays out of this path on purpose.
+    private func fadeOutLights() {
+        let buttons = trafficLights
+        guard !buttons.isEmpty else { return }
+        cancelLightsFade()
+        // Any write to these buttons makes AppKit re-place them at its own titlebar row, undoing
+        // the `lightsDrop`; re-assert the drop here and on every step so the dissolve happens
+        // where the lights actually are instead of 9pt higher.
+        alignTrafficLights()
+        lightsFadeFrom = buttons[0].alphaValue
+        guard lightsFadeFrom > 0.001 else {
+            for button in buttons { button.isHidden = true }
+            return
+        }
+        lightsFadeStarted = CACurrentMediaTime()
+        // `.common` keeps the ramp alive while the pointer drags or a menu tracks.
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.stepLightsFade()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        lightsFadeTimer = timer
+    }
+
+    private func stepLightsFade() {
+        let buttons = trafficLights
+        guard !buttons.isEmpty else {
+            cancelLightsFade()
+            return
+        }
+        let progress = min(1, (CACurrentMediaTime() - lightsFadeStarted) / Self.lightsFadeOutDuration)
+        // Ease-out: let go of full opacity at once, take the time to reach zero.
+        let eased = 1 - pow(1 - progress, 3)
+        for button in buttons {
+            button.alphaValue = lightsFadeFrom * CGFloat(1 - eased)
+        }
+        // Writing the alpha is what makes AppKit snap the cluster back to its own row, so the drop
+        // has to be re-applied after every step, not once.
+        alignTrafficLights()
+        guard progress >= 1 else { return }
+        cancelLightsFade()
+        for button in buttons { button.isHidden = true }
+    }
+
+    /// Stops a running exit fade; the caller decides the next alpha.
+    private func cancelLightsFade() {
+        lightsFadeTimer?.invalidate()
+        lightsFadeTimer = nil
+    }
+
+    /*
+    /// Original animation, kept for reference while the dissolve is tuned.
     private static func fade(_ buttons: [NSButton], to alpha: CGFloat, completion: (() -> Void)? = nil) {
         NSAnimationContext.runAnimationGroup(
             { context in
                 context.duration = 0.18
+                for button in buttons {
+                    button.animator().alphaValue = alpha
+                }
+            },
+            completionHandler: completion
+        )
+    }
+    */
+
+    /// Dissolves the given buttons as one group with a longer eased fade, used by both the hover
+    /// band and display-mode switches. Runs `completion` after the animation ends.
+    private static func dissolve(
+        _ buttons: [NSButton],
+        to alpha: CGFloat,
+        duration: TimeInterval = 0.35,
+        completion: (() -> Void)? = nil
+    ) {
+        NSAnimationContext.runAnimationGroup(
+            { context in
+                context.duration = duration
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                context.allowsImplicitAnimation = true
                 for button in buttons {
                     button.animator().alphaValue = alpha
                 }

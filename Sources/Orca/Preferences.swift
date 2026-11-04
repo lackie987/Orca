@@ -9,10 +9,14 @@ final class Preferences {
         static let profile = "profileName"
         static let command = "dshCommand"
         static let keepServiceRunning = "keepServiceRunningAfterQuit"
+        static let disableInputCompletion = "disableInputCompletion"
         static let pageZoom = "pageZoom"
         static let titleBarMode = "titleBarMode"
         static let splashBaseColor = "splashBaseColor"
+        static let splashBaseColorLight = "splashBaseColorLight"
+        static let splashBaseColorDark = "splashBaseColorDark"
         static let themeSource = "themeSource"
+        static let glassEnabled = "glassEnabled"
         static let appIconPreset = "appIconPreset"
         static let appIconFollowsTheme = "appIconFollowsTheme"
         static let appIconFollowMode = "appIconFollowMode"
@@ -20,6 +24,7 @@ final class Preferences {
         static let appIconTemplateColor = "appIconTemplateColor"
         static let appIconTemplateFollowsTheme = "appIconTemplateFollowsTheme"
         static let customAppIconPath = "customAppIconPath"
+        static let language = "shellLanguage"
     }
 
     private let defaults = UserDefaults.standard
@@ -30,10 +35,14 @@ final class Preferences {
             Key.profile: "web",
             Key.command: "dsh",
             Key.keepServiceRunning: false,
+            Key.disableInputCompletion: true,
             Key.pageZoom: 1.0,
             Key.titleBarMode: TitleBarMode.lightsOnly.rawValue,
             Key.splashBaseColor: "",
+            Key.splashBaseColorLight: "",
+            Key.splashBaseColorDark: "",
             Key.themeSource: "",
+            Key.glassEnabled: true,
             Key.appIconPreset: "orca",
             Key.appIconFollowsTheme: false,
             Key.appIconFollowMode: "",
@@ -41,6 +50,7 @@ final class Preferences {
             Key.appIconTemplateColor: "",
             Key.appIconTemplateFollowsTheme: false,
             Key.customAppIconPath: "",
+            Key.language: ShellLanguage.zh.rawValue,
         ])
     }
 
@@ -68,6 +78,13 @@ final class Preferences {
         set { defaults.set(newValue, forKey: Key.keepServiceRunning) }
     }
 
+    /// Turns off macOS autocorrect, autocomplete, autospell and auto-capitalization in the page's
+    /// text fields and rich-text editors. On by default; the native settings panel toggles it.
+    var disableInputCompletion: Bool {
+        get { defaults.bool(forKey: Key.disableInputCompletion) }
+        set { defaults.set(newValue, forKey: Key.disableInputCompletion) }
+    }
+
     /// Page zoom preserved across launches.
     var pageZoom: Double {
         get { defaults.double(forKey: Key.pageZoom) }
@@ -82,9 +99,24 @@ final class Preferences {
     }
 
     /// Base colour published by the web theme for the startup surface; empty before the first report.
+    ///
+    /// Every report is also filed under its own lightness, so the plane an appearance the page has
+    /// already painted can be reproduced while Orca is quit (`orca-icon-sync` has no page to ask).
     var splashBaseColor: String {
         get { defaults.string(forKey: Key.splashBaseColor) ?? "" }
-        set { defaults.set(newValue, forKey: Key.splashBaseColor) }
+        set {
+            defaults.set(newValue, forKey: Key.splashBaseColor)
+            guard let color = ColorHex.color(newValue) else { return }
+            defaults.set(
+                newValue,
+                forKey: ColorHex.isDark(color) ? Key.splashBaseColorDark : Key.splashBaseColorLight
+            )
+        }
+    }
+
+    /// The page base last painted on one side of light/dark, empty when that side never rendered.
+    func splashBaseColor(forDark isDark: Bool) -> String {
+        defaults.string(forKey: isDark ? Key.splashBaseColorDark : Key.splashBaseColorLight) ?? ""
     }
 
     /// Last page theme source reported by the theme bridge: `light`, `dark` or `system`.
@@ -94,6 +126,18 @@ final class Preferences {
     var themeSource: String {
         get { defaults.string(forKey: Key.themeSource) ?? "" }
         set { defaults.set(newValue, forKey: Key.themeSource) }
+    }
+
+    /// Whether the window keeps its native material behind the page, set by the `dsh-patch`
+    /// background tab through the `__ORCA_GLASS__` bridge.
+    ///
+    /// On by default: the `NSVisualEffectView` sits under a clear web view, so a page that keeps its
+    /// own surfaces opaque (the stock case) never sees it, and lowering the interface opacity
+    /// reveals the blurred desktop. Switched off, the window paints the theme base instead, so a
+    /// transparent page shows a flat plane rather than the desktop.
+    var glassEnabled: Bool {
+        get { defaults.bool(forKey: Key.glassEnabled) }
+        set { defaults.set(newValue, forKey: Key.glassEnabled) }
     }
 
     /// Selected Dock-icon preset; `"orca"` by default, others resolved through `AppIcon`.
@@ -145,4 +189,14 @@ final class Preferences {
         get { defaults.string(forKey: Key.customAppIconPath) ?? "" }
         set { defaults.set(newValue, forKey: Key.customAppIconPath) }
     }
+
+    /// Language of the strings the shell itself draws. The page's locale is its own business, so
+    /// this never reaches the web content.
+    var language: ShellLanguage {
+        get { ShellLanguage.parse(defaults.string(forKey: Key.language)) }
+        set { defaults.set(newValue.rawValue, forKey: Key.language) }
+    }
+
+    /// The copy table for the current language.
+    var copy: ShellCopy { ShellCopy.of(language) }
 }

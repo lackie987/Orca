@@ -31,6 +31,13 @@ final class ServiceController {
     private(set) var accessURL: URL?
 
     private let preferences: Preferences
+    /// Serializes everything the child's output touches.
+    ///
+    /// `logHandle`, `outputBuffer`, `recentLines` and `didDiscoverAccessURL` are written by `consume`
+    /// on this queue (it runs from the pipe's `readabilityHandler`, on a thread of its own) and were
+    /// also reset straight from `launch` on the main thread. Two threads mutating one `String` and one
+    /// `Array` is a data race whose crash surfaces inside `String.append` with a stack that says
+    /// nothing about the service. Every touch now goes through this queue.
     private let outputQueue = DispatchQueue(label: "com.xu.orca.service-output")
     private var process: Process?
     private var stdoutPipe: Pipe?
@@ -53,6 +60,11 @@ final class ServiceController {
     private var isStopping = false
     private var adoptedPid: Int32?
     private var didDiscoverAccessURL = false
+
+    /// Longest a launch may stay in `.starting` before the window reports a timeout.
+    private static let startupDeadline: TimeInterval = 45
+    /// PATH prefix for the login shell: GUI-launched apps do not inherit a terminal PATH.
+    private static let searchPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
     init(preferences: Preferences) {
         self.preferences = preferences
@@ -80,15 +92,20 @@ final class ServiceController {
     ///
     /// The window reports a restart as one continuous progress state: it never passes through the
     /// stopped state, so the splash keeps its spinner instead of offering buttons mid-refresh. The
-    /// delayed launch is keyed to this call rather than to the visible state, so a state change
-    /// inside the pause cannot leave the window spinning with no process and no deadline.
+    /// relaunch is keyed to this call rather than to the visible state, so a state change inside the
+    /// wait cannot leave the window spinning with no process and no deadline.
     func restart() {
-        teardown()
-        didRelaunchAfterCrash = false
-        state = .starting("Restarting the local service…")
         restartToken += 1
         let token = restartToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+        didRelaunchAfterCrash = false
+        // Read the port before `teardown` forgets the URL the running service was reached on.
+        let port = accessURL?.port ?? preferences.port
+        state = .starting(preferences.copy.service.restarting)
+        teardown()
+        // The new server cannot bind until the old listener is gone, so that release — not a fixed
+        // pause — is what the relaunch waits on. `teardown` already sent SIGTERM and SIGKILL follows
+        // one grace period later, so this always settles; the timeout only bounds a wedged case.
+        PortProbe.notifyWhenFree(port: port, within: 5) { [weak self] in
             guard let self, self.restartToken == token, self.process == nil else { return }
             self.launchOnAvailablePort()
         }
@@ -110,8 +127,18 @@ final class ServiceController {
     }
 
     /// Stops the service for application termination unless the user keeps it alive between launches.
-    func shutdown() {
-        guard !preferences.keepServiceRunningAfterQuit || accessURL == nil else { return }
+    ///
+    /// The wait for the child happens on a background queue and reports back on the main one. It used
+    /// to park the main thread on a semaphore for up to two seconds of a quit, which froze AppKit
+    /// while the system's own termination watchdog was already running.
+    /// - Parameters:
+    ///   - grace: seconds to wait for `SIGTERM` before escalating to `SIGKILL`.
+    ///   - completion: called on the main queue once the child is gone.
+    func shutdown(grace: TimeInterval = 2, completion: @escaping () -> Void = {}) {
+        guard !preferences.keepServiceRunningAfterQuit || accessURL == nil else {
+            completion()
+            return
+        }
         isStopping = true
         cancelTimers()
         if adoptedPid != nil {
@@ -120,19 +147,27 @@ final class ServiceController {
         }
         guard let child = detachChild() else {
             ServiceSessionStore.clear()
+            completion()
             return
         }
         if child.isRunning {
             child.terminate()
         }
-        let deadline = Date().addingTimeInterval(2)
-        while child.isRunning && Date() < deadline {
-            usleep(50_000)
+        // `terminationHandler` reports through the main queue, which is why the wait cannot rely on
+        // it: the caller may be that same queue, mid-termination. Polling off the main thread and
+        // reporting back keeps the reply honest — the app terminates when the child is really gone.
+        let pid = child.processIdentifier
+        DispatchQueue.global(qos: .userInitiated).async {
+            let deadline = Date().addingTimeInterval(grace)
+            while child.isRunning && Date() < deadline {
+                usleep(50_000)
+            }
+            if child.isRunning {
+                kill(pid, SIGKILL)
+            }
+            ServiceSessionStore.clear()
+            DispatchQueue.main.async(execute: completion)
         }
-        if child.isRunning {
-            kill(child.processIdentifier, SIGKILL)
-        }
-        ServiceSessionStore.clear()
     }
 
     // MARK: - Process bookkeeping
@@ -188,7 +223,7 @@ final class ServiceController {
     /// port are both checked, because a server can outlive its listener.
     private func watchAdoptedService(pid: Int32, port: Int) {
         stopAdoptionWatchdog()
-        adoptionWatchdog = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] timer in
             guard let self, adoptedPid == pid else {
                 timer.invalidate()
                 return
@@ -202,6 +237,10 @@ final class ServiceController {
             stopAdoptionWatchdog()
             adoptedServiceExited()
         }
+        // `.common`, like the readiness timer: with the default mode a lost service went unnoticed
+        // for as long as a menu was open or the window was being dragged.
+        RunLoop.main.add(timer, forMode: .common)
+        adoptionWatchdog = timer
     }
 
     /// Stops watching the adopted service and forgets how many probes it has missed.
@@ -221,9 +260,7 @@ final class ServiceController {
         accessURL = nil
         ServiceSessionStore.clear()
         guard !didRelaunchAfterCrash else {
-            state = .failed(
-                "The local service from the previous launch stopped answering. Start it again to reconnect."
-            )
+            state = .failed(preferences.copy.service.previousStopped)
             return
         }
         didRelaunchAfterCrash = true
@@ -243,20 +280,29 @@ final class ServiceController {
         guard let session = ServiceSessionStore.load(),
               session.pid > 0,
               kill(session.pid, 0) == 0,
+              // A live pid is not proof: the kernel reuses numbers, and adopting a reused one handed
+              // `teardown` a licence to SIGTERM an unrelated process. The recorded start time is the
+              // only thing that distinguishes "our service" from "whoever has that number now".
+              ServiceSessionStore.matchesLiveProcess(session),
               let url = URL(string: session.url)
         else {
             return false
         }
         accessURL = url
-        state = .starting("Reconnecting to the local service…")
+        state = .starting(preferences.copy.service.reconnecting)
         var settled = false
+        // The health check outlives a restart decision. Without a generation of its own, its answer
+        // arrives after `teardown` has already cleared the adopted service and re-registers it as
+        // `.ready` while a fresh child is being launched — two services on one profile.
+        restartToken += 1
+        let token = restartToken
         let settle = { [weak self] (healthy: Bool) in
             DispatchQueue.main.async {
                 guard let self, !settled else { return }
                 settled = true
                 self.adoptionTimer?.invalidate()
                 self.adoptionTimer = nil
-                guard self.process == nil else { return }
+                guard self.restartToken == token, self.process == nil else { return }
                 if healthy {
                     self.adoptedPid = session.pid
                     self.state = .ready(url)
@@ -290,13 +336,18 @@ final class ServiceController {
             launch(port: preferredPort)
             return
         }
-        state = .starting("Freeing port \(preferredPort)…")
+        state = .starting(preferences.copy.service.freeingPort(preferredPort))
         // The reclaim runs before any child exists, so nothing else would notice a hang here.
-        armDeadline(seconds: 45)
+        armDeadline(seconds: Self.startupDeadline)
+        // The reclaim can take seconds. A restart during it must win, otherwise this call's
+        // completion launches a *second* child while the restart's own launch is still pending —
+        // `process` keeps only the newer one and the older child runs on untracked, holding the port.
+        restartToken += 1
+        let token = restartToken
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let outcome = PortOwner.reclaim(preferredPort)
             DispatchQueue.main.async {
-                guard let self, self.state.isStarting else { return }
+                guard let self, self.restartToken == token, self.state.isStarting else { return }
                 switch outcome {
                 case .free:
                     self.launch(port: preferredPort)
@@ -307,7 +358,7 @@ final class ServiceController {
                     self.note("port \(preferredPort) is held by \(owner); falling back to a free port")
                     self.launch(
                         port: 0,
-                        notice: "\(owner) holds port \(preferredPort), so plugins start from their defaults."
+                        notice: self.preferences.copy.service.portHeld(by: owner, port: preferredPort)
                     )
                 }
             }
@@ -319,18 +370,20 @@ final class ServiceController {
     ///   - port: the port to listen on; `0` lets the kernel pick one.
     ///   - notice: an extra sentence shown next to the progress line, e.g. why the port changed.
     private func launch(port: Int, notice: String? = nil) {
+        // Last line of defence for the launch race: every caller above only *believes* no child
+        // exists. Overwriting `process` here is what orphaned a running service — the old child's
+        // pid was lost, `shutdown` never saw it, and the port stayed taken for the next launch.
+        guard process == nil else { return }
         isStopping = false
         accessURL = nil
-        outputBuffer = ""
-        recentLines.removeAll()
-        didDiscoverAccessURL = false
-        state = .starting(Self.progressMessage(port: port, notice: notice))
+        resetCapturedOutput()
+        state = .starting(progressMessage(port: port, notice: notice))
         openLog()
 
         let configuredCommand = ServiceCommand.nonEmpty(preferences.command, fallback: "dsh")
         guard let executable = ServiceCommand.resolve(configuredCommand) else {
             closeLog()
-            state = .failed("Orca can’t find “\(configuredCommand)”. Set its path in Orca Settings (⌥⌘,).")
+            state = .failed(preferences.copy.service.commandMissing(configuredCommand))
             return
         }
         let profile = ServiceCommand.nonEmpty(preferences.profile, fallback: "web")
@@ -341,7 +394,7 @@ final class ServiceController {
         child.arguments = ["-lc", script]
         child.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         var environment = ProcessInfo.processInfo.environment
-        let searchPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        let searchPaths = Self.searchPath
         environment["PATH"] = searchPaths + ":" + (environment["PATH"] ?? "")
         child.environment = environment
 
@@ -361,13 +414,13 @@ final class ServiceController {
             try child.run()
         } catch {
             closeLog()
-            state = .failed("Orca can’t launch “\(executable)”. Check the command in Orca Settings (⌥⌘,).")
+            state = .failed(preferences.copy.service.launchFailed(executable))
             return
         }
 
         process = child
         stdoutPipe = pipe
-        armDeadline(seconds: 45)
+        armDeadline(seconds: Self.startupDeadline)
     }
 
     /// Terminates the child without changing the visible state.
@@ -399,15 +452,16 @@ final class ServiceController {
 
         let status = child.terminationStatus
         let detail = failureDetail()
-        state = .failed(detail ?? "The local service exited with status \(status).")
+        state = .failed(detail ?? preferences.copy.service.exited(status: status))
     }
 
     /// Best-effort explanation from the captured output, with any token redacted.
     private func failureDetail() -> String? {
         let known: [String] = ["command not found", "EADDRINUSE", "Error:", "error:"]
-        guard let line = recentLines.last(where: { candidate in
+        let lines = capturedLines()
+        guard let line = lines.last(where: { candidate in
             known.contains(where: { candidate.contains($0) })
-        }) ?? recentLines.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+        }) ?? lines.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
         else {
             return nil
         }
@@ -424,19 +478,24 @@ final class ServiceController {
     // MARK: - Readiness
 
     private func consume(_ data: Data) {
-        logHandle?.write(data)
+        LogFile.append(data, to: logHandle)
         let text = String(decoding: data, as: UTF8.self)
-        outputBuffer += text
-        if outputBuffer.count > 200_000 {
-            outputBuffer = String(outputBuffer.suffix(100_000))
-        }
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
             recentLines.append(String(line))
         }
         if recentLines.count > 80 {
             recentLines.removeFirst(recentLines.count - 80)
         }
-        guard !didDiscoverAccessURL, let url = Self.parseAccessURL(in: outputBuffer) else { return }
+        // Past the banner, `outputBuffer` exists only to be searched for it. Concatenating every
+        // later chunk onto a buffer that grows to 200 KB, then running the pattern over the whole
+        // of it, was work done for the entire life of the service rather than for its startup.
+        // `recentLines` above is what a crash still reads, so the tail stays useful.
+        guard !didDiscoverAccessURL else { return }
+        outputBuffer += text
+        if outputBuffer.count > 200_000 {
+            outputBuffer = String(outputBuffer.suffix(100_000))
+        }
+        guard let url = Self.parseAccessURL(in: outputBuffer) else { return }
         didDiscoverAccessURL = true
         DispatchQueue.main.async { [weak self] in
             self?.handleAccessURL(url)
@@ -446,9 +505,14 @@ final class ServiceController {
     private func handleAccessURL(_ url: URL) {
         guard accessURL == nil, let child = process else { return }
         accessURL = url
-        state = .starting("Loading the workspace…")
+        state = .starting(preferences.copy.service.loadingWorkspace)
         ServiceSessionStore.save(
-            ServiceSession(pid: child.processIdentifier, url: url.absoluteString, startedAt: Date())
+            ServiceSession(
+                pid: child.processIdentifier,
+                url: url.absoluteString,
+                startedAt: Date(),
+                processStartedAt: ProcessIdentity.startTime(of: child.processIdentifier)
+            )
         )
         beginReadinessPolling(url)
     }
@@ -457,34 +521,46 @@ final class ServiceController {
         readinessTimer?.invalidate()
         deadlineTimer?.invalidate()
         let startedAt = Date()
-        readinessTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] timer in
+        // A probe takes up to two seconds and a restart can start inside that window. The old
+        // completion only asked "is there a child?", which the *new* child satisfies — so it reported
+        // the previous tokenized URL as ready, the window loaded an origin nothing listens on, and
+        // `readinessTimer = nil` detached the new timer from `cancelTimers()`.
+        restartToken += 1
+        let token = restartToken
+        readinessTimer = Timer(timeInterval: 0.3, repeats: true) { [weak self] timer in
             guard let self else {
                 timer.invalidate()
                 return
             }
             self.checkHealth(url) { healthy in
                 DispatchQueue.main.async {
-                    guard self.process != nil else { return }
+                    guard self.restartToken == token, self.process != nil else { return }
                     if healthy {
                         timer.invalidate()
-                        self.readinessTimer = nil
+                        if self.readinessTimer === timer { self.readinessTimer = nil }
                         self.state = .ready(url)
                     } else if Date().timeIntervalSince(startedAt) > 25 {
                         timer.invalidate()
-                        self.readinessTimer = nil
+                        if self.readinessTimer === timer { self.readinessTimer = nil }
                         self.fail("The local service did not become ready. See the service log for details.")
                     }
                 }
             }
         }
+        // `.common` so the progress line keeps counting while a menu is open or the window is being
+        // dragged; the default mode stops firing during event tracking.
+        RunLoop.main.add(readinessTimer!, forMode: .common)
     }
 
     private func armDeadline(seconds: TimeInterval) {
         deadlineTimer?.invalidate()
-        deadlineTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
             guard let self, self.state.isStarting else { return }
-            self.fail("The local service did not start within \(Int(seconds)) seconds.")
+            self.fail(self.preferences.copy.service.didNotStart(seconds: Int(seconds)))
         }
+        // `.common`: a startup deadline that pauses while the user holds a menu open is not a deadline.
+        RunLoop.main.add(timer, forMode: .common)
+        deadlineTimer = timer
     }
 
     private func fail(_ message: String) {
@@ -509,9 +585,20 @@ final class ServiceController {
 
     // MARK: - Log
 
+    /// Opens the service log and records a launch banner, on the queue that owns the handle.
     private func openLog() {
-        logHandle = LogFile.openForAppending(AppPaths.serviceLog, rotatingBeyond: 4_000_000)
-        logHandle?.write(Data("\n==== Orca launch \(LogFile.stamp()) ====\n".utf8))
+        outputQueue.async { [weak self] in
+            guard let self else { return }
+            // A previous launch can leave its handle open — `stopChild` returns before closing when
+            // there was no child to stop — and reusing it would drop this launch's banner and skip
+            // the rotation check.
+            if let existing = self.logHandle {
+                try? existing.close()
+                self.logHandle = nil
+            }
+            self.logHandle = LogFile.openForAppending(AppPaths.serviceLog, rotatingBeyond: 4_000_000)
+            LogFile.append(Data("\n==== Orca launch \(LogFile.stamp()) ====\n".utf8), to: self.logHandle)
+        }
     }
 
     private func closeLog() {
@@ -521,6 +608,22 @@ final class ServiceController {
         }
     }
 
+    // MARK: - Captured output
+
+    /// Clears what the previous child printed, on the queue that owns it.
+    private func resetCapturedOutput() {
+        outputQueue.async { [weak self] in
+            self?.outputBuffer.removeAll(keepingCapacity: true)
+            self?.recentLines.removeAll(keepingCapacity: true)
+            self?.didDiscoverAccessURL = false
+        }
+    }
+
+    /// A copy of the last lines captured, read on the queue that owns them.
+    private func capturedLines() -> [String] {
+        outputQueue.sync { recentLines }
+    }
+
     // MARK: - Helpers
 
     /// The one-line progress shown while the service boots.
@@ -528,10 +631,9 @@ final class ServiceController {
     ///   - port: the port being used; `0` means the kernel picked one.
     ///   - notice: an extra sentence appended when the port had to change.
     /// - Returns: the message carried by the `starting` state.
-    private static func progressMessage(port: Int, notice: String?) -> String {
-        let base = port == 0
-            ? "Starting the local service…"
-            : "Starting the local service on port \(port)…"
+    private func progressMessage(port: Int, notice: String?) -> String {
+        let copy = preferences.copy.service
+        let base = port == 0 ? copy.starting : copy.starting(port: port)
         guard let notice else { return base }
         return "\(base) \(notice)"
     }
@@ -540,14 +642,13 @@ final class ServiceController {
     /// - Parameter line: the note to record, already phrased for a reader.
     private func note(_ line: String) {
         let handle = LogFile.openForAppending(AppPaths.serviceLog, rotatingBeyond: 4_000_000)
-        handle?.write(Data("[orca] \(line)\n".utf8))
+        LogFile.append(Data("[orca] \(line)\n".utf8), to: handle)
         try? handle?.close()
     }
 
     /// Pulls the tokenized access URL out of the server banner (`dsh web: http://…`).
     private static func parseAccessURL(in text: String) -> URL? {
-        let pattern = #"dsh web:\s+(http://\S+)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
+        guard let regex = accessURLPattern,
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
               let range = Range(match.range(at: 1), in: text)
         else {
@@ -555,4 +656,8 @@ final class ServiceController {
         }
         return URL(string: String(text[range]))
     }
+
+    /// Compiled once. Building an `NSRegularExpression` costs more than running it, and this one
+    /// ran on every chunk the child printed until the banner appeared.
+    private static let accessURLPattern = try? NSRegularExpression(pattern: #"dsh web:\s+(http://\S+)"#)
 }

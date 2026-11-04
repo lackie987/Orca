@@ -17,10 +17,7 @@ enum AppIconInstaller {
     /// stops serving the icon it cached (see `markBundleChanged`).
     static func apply(_ icon: NSImage, forApp appPath: String) {
         NSApp.applicationIconImage = icon
-        let bundleIcon = URL(fileURLWithPath: appPath)
-            .appendingPathComponent("Contents")
-            .appendingPathComponent("Resources")
-            .appendingPathComponent("AppIcon.icns")
+        let bundleIcon = iconFile(appPath)
         // `NSWorkspace.setIcon` used to accompany the write so Finder would refresh. Its
         // custom-icon record is `com.apple.FinderInfo` on the bundle, which `codesign` refuses to
         // sign at all — every colour change then left the installed app unsealable. The bundled
@@ -28,8 +25,7 @@ enum AppIconInstaller {
         if IcnsWriter.writeIfChanged(icon, to: bundleIcon) {
             AppBundleSeal.schedule(for: appPath)
         }
-        markBundleChanged(appPath)
-    }
+        markBundleChanged(appPath)    }
 
     /// Marks the bundle as freshly changed, which is what makes the system re-read its icon.
     ///
@@ -80,11 +76,78 @@ enum AppIconInstaller {
     @discardableResult
     static func applyCurrent(_ preferences: Preferences, forApp appPath: String) -> NSImage? {
         guard let icon = AppIcon.current(preferences) else { return nil }
-        apply(icon, forApp: appPath)
-        // The template also lands as a real `.icns`, so an SVG + colour becomes a normal icon file.
-        if preferences.appIconPreset == "template" {
-            _ = IcnsWriter.write(icon, to: AppPaths.templateIcon)
+        let key = AppIcon.signature(for: preferences)
+        // The bundle already carries exactly this icon. Rebuilding it costs a seven-size PNG encode
+        // *before* `writeIfChanged` can compare anything — "nothing changed" used to save no work at
+        // all — plus a re-sign and a LaunchServices nudge. Only the live tile is re-asserted, which
+        // is the cheap half and the one that matters after macOS reloads the bundle icon.
+        if key == appliedSignature,
+           FileManager.default.fileExists(atPath: iconFile(appPath).path) {
+            NSApp.applicationIconImage = icon
+            AppIconVariants.schedule(preferences)
+            return icon
         }
+        apply(icon, forApp: appPath)
+        appliedSignature = key
+        // The background agent can only install what Orca has already rendered, so keep its two
+        // appearances in step with every icon this process puts on the bundle.
+        AppIconVariants.schedule(preferences)
+        // The template also used to land as its own `.icns`, so an SVG plus a colour became a
+        // normal icon file. Nothing ever read it back, and it was rewritten on every launch,
+        // activation and theme switch — a full seven-size PNG encode on the main thread each time.
+        // if preferences.appIconPreset == "template" {
+        //     _ = IcnsWriter.write(icon, to: AppPaths.templateIcon)
+        // }
         return icon
     }
+
+    /// Applies the icon after a quiet period, composing off the main thread.
+    ///
+    /// A dragged colour well posts a new value on nearly every frame. Composing is a 1024px
+    /// rasterisation, so doing it per frame froze the window; the write is a further seven PNG
+    /// encodes. Coalescing to one run per quiet period and moving the compose off the main thread
+    /// keeps the drag smooth, and the tile is still set as soon as that run finishes.
+    static func applyCurrentDebounced(
+        _ preferences: Preferences,
+        forApp appPath: String,
+        after delay: TimeInterval = 0.12
+    ) {
+        pendingWork?.cancel()
+        let work = DispatchWorkItem {
+            guard let icon = AppIcon.current(preferences) else { return }
+            DispatchQueue.main.async {
+                NSApp.applicationIconImage = icon
+                applyCurrent(preferences, forApp: appPath)
+            }
+        }
+        pendingWork = work
+        composeQueue.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// The bundle's icon file: the one `apply` writes and Finder and the next launch read.
+    private static func iconFile(_ appPath: String) -> URL {
+        URL(fileURLWithPath: appPath)
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Resources")
+            .appendingPathComponent("AppIcon.icns")
+    }
+
+    /// The signature last written to the bundle, so a steady-state launch skips the rewrite.
+    ///
+    /// Persisted because the bundle icon outlives the process: a launch that finds its own signature
+    /// here knows the file on disk already matches what the saved preset resolves to. Cleared when
+    /// the file is missing, so a replaced or repaired `.app` is rebuilt rather than trusted.
+    private static var appliedSignature: String? {
+        get { UserDefaults.standard.string(forKey: appliedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: appliedKey) }
+    }
+
+    private static let appliedKey = "orca.appIcon.appliedSignature"
+
+    /// Pending debounced compose; cancelled and replaced by the next call.
+    private static var pendingWork: DispatchWorkItem?
+
+    /// Serial queue for the debounced compose. NSImage drawing is safe off the main thread; only
+    /// `NSApplication` and the `NSWorkspace` nudge in `apply` are not, and those run on main.
+    private static let composeQueue = DispatchQueue(label: "orca.appicon.compose", qos: .userInitiated)
 }

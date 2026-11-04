@@ -11,11 +11,10 @@ enum ColorHex {
             text.removeFirst()
         }
         guard text.count == 6, let rgb = UInt32(text, radix: 16) else { return nil }
-        return NSColor(
-            srgbRed: CGFloat((rgb >> 16) & 0xff) / 255,
-            green: CGFloat((rgb >> 8) & 0xff) / 255,
-            blue: CGFloat(rgb & 0xff) / 255,
-            alpha: 1
+        return srgb(
+            red: Double((rgb >> 16) & 0xff),
+            green: Double((rgb >> 8) & 0xff),
+            blue: Double(rgb & 0xff)
         )
     }
 
@@ -32,13 +31,17 @@ enum ColorHex {
             .split(whereSeparator: { $0 == "," || $0 == " " || $0 == "/" })
             .compactMap { Double($0) }
         guard numbers.count >= 3 else { return nil }
-        let color = NSColor(
-            srgbRed: CGFloat(numbers[0]) / 255,
-            green: CGFloat(numbers[1]) / 255,
-            blue: CGFloat(numbers[2]) / 255,
+        return string(srgb(red: numbers[0], green: numbers[1], blue: numbers[2]))
+    }
+
+    /// Builds the one colour both parsers need from 0–255 channels.
+    private static func srgb(red: Double, green: Double, blue: Double) -> NSColor {
+        NSColor(
+            srgbRed: CGFloat(red) / 255,
+            green: CGFloat(green) / 255,
+            blue: CGFloat(blue) / 255,
             alpha: 1
         )
-        return string(color)
     }
 
     /// Renders a colour back to lowercase `#rrggbb`; nil when it has no sRGB representation.

@@ -65,6 +65,23 @@ extension WebPageController: WKUIDelegate {
         }
     }
 
+    /// `<input type="file">` needs this delegate or the click is silently dropped; the page's own
+    /// drop targets (the composer, the wallpaper row) never reach it.
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.canChooseDirectories = parameters.allowsDirectories
+        panel.canChooseFiles = true
+        present(panel) { response in
+            completionHandler(response == .OK ? panel.urls : nil)
+        }
+    }
+
     @available(macOS 12.0, *)
     func webView(
         _ webView: WKWebView,
@@ -101,9 +118,9 @@ extension WebPageController: WKDownloadDelegate {
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         let alert = NSAlert()
-        alert.messageText = "Download failed"
+        alert.messageText = Preferences.shared.copy.alert.downloadFailed
         alert.informativeText = error.localizedDescription
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: Preferences.shared.copy.common.ok)
         present(alert) { _ in }
     }
 }

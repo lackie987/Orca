@@ -8,12 +8,13 @@ import AppKit
 enum JavaScriptPanels {
     /// `alert()`: one button, nothing to decide.
     static func alert(_ message: String) -> NSAlert {
-        panel(message, buttons: ["OK"])
+        panel(message, buttons: [Preferences.shared.copy.common.ok])
     }
 
     /// `confirm()` and `prompt()`: OK first, Cancel second, which is the order JS expects.
     static func confirmation(_ message: String) -> NSAlert {
-        panel(message, buttons: ["OK", "Cancel"])
+        let copy = Preferences.shared.copy
+        return panel(message, buttons: [copy.common.ok, copy.common.cancel])
     }
 
     /// Builds the alert with its buttons in the order given.

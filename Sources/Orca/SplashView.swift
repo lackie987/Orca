@@ -45,13 +45,17 @@ final class SplashView: NSView {
     private let statusLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private let buttonRow = NSStackView()
-    private let retryButton = NSButton(title: "Try Again", target: nil, action: nil)
-    private let logButton = NSButton(title: "Service Log", target: nil, action: nil)
+    private let retryButton = NSButton(title: "", target: nil, action: nil)
+    private let logButton = NSButton(title: "", target: nil, action: nil)
+
+    /// The shell's copy table for the language in force when the surface is built.
+    private var copy: ShellCopy { Preferences.shared.copy }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         build()
-        showStarting("Preparing the local service…")
+        applyCopy()
+        showStarting(copy.splash.preparing)
     }
 
     required init?(coder: NSCoder) {
@@ -59,6 +63,12 @@ final class SplashView: NSView {
     }
 
     // MARK: - States
+
+    /// Names the two action buttons; the states below only change what the surface says.
+    func applyCopy() {
+        retryButton.title = copy.splash.tryAgain
+        logButton.title = copy.splash.serviceLog
+    }
 
     /// Shows the plain progress screen; the button row stays hidden while the service comes up.
     func showStarting(_ message: String) {
@@ -91,7 +101,20 @@ final class SplashView: NSView {
         surface(buttonsHidden: false)
         spinner.stopAnimation(nil)
         spinner.isHidden = true
-        statusLabel.stringValue = "The local service is unavailable"
+        statusLabel.stringValue = copy.splash.unavailable
+        detailLabel.stringValue = message
+    }
+
+    /// Shows a page that never rendered while the service itself is up.
+    ///
+    /// Distinct from {@link showFailure} on purpose: "the service is unavailable" would be wrong here,
+    /// and the sentence a user reads is what decides whether they retry or go looking for the log.
+    /// - Parameter message: what WebKit (or the HTTP status) reported, already user-readable.
+    func showPageFailure(_ message: String) {
+        surface(buttonsHidden: false)
+        spinner.stopAnimation(nil)
+        spinner.isHidden = true
+        statusLabel.stringValue = copy.splash.pageFailed
         detailLabel.stringValue = message
     }
 
@@ -99,8 +122,8 @@ final class SplashView: NSView {
         surface(buttonsHidden: false)
         spinner.stopAnimation(nil)
         spinner.isHidden = true
-        statusLabel.stringValue = "The local service is stopped"
-        detailLabel.stringValue = "Restart it whenever you are ready."
+        statusLabel.stringValue = copy.splash.stopped
+        detailLabel.stringValue = copy.splash.stoppedDetail
     }
 
     /// Brings the surface back to full opacity for every state, with the action row on or off.
@@ -123,6 +146,11 @@ final class SplashView: NSView {
             animator().alphaValue = 0
         } completionHandler: { [weak self] in
             guard let self else { return }
+            // The surface is only ever hidden, never torn down, so a spinner left running keeps
+            // animating for the rest of the session — inside a window that sits on a live
+            // `behindWindow` blur, which turns that animation into a per-frame recomposite of the
+            // frosted backdrop. Nothing else stops it: only the stopped and failed states do.
+            spinner.stopAnimation(nil)
             isHidden = true
             alphaValue = 1
         }

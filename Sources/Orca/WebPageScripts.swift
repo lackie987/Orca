@@ -4,32 +4,49 @@ import WebKit
 /// Every script the shell injects into the page, and the order it runs in.
 ///
 /// The scripts are the page side of the native bridges: they define `window.__DSH_DIRECTORY_PICKER__`,
-/// `window.__ORCA_TITLEBAR__` and `window.__ORCA_PALETTE__`, mirror the theme back to the shell, and
-/// report the events the native side waits for (drag-band height and the first painted frame).
+/// `window.__ORCA_TITLEBAR__`, `window.__ORCA_GLASS__` and `window.__ORCA_PALETTE__`, mirror the theme
+/// back to the shell, and report the events the native side waits for (drag-band height and the first
+/// painted frame).
 /// The literals live in one file per concern — `WebPageScriptsDesktop` for the desktop-runtime
 /// illusion, `WebPageScriptsChrome` for the window and the theme, `WebPageScriptsPage` for the page
 /// bridges — while this file owns only the order they run in.
 enum WebPageScripts {
     /// Adds every script to the page, in the order the web view should run it.
-    static func install(on userContentController: WKUserContentController, bootBackground: String, bootFont: String?) {
-        for script in userScripts(bootBackground: bootBackground, bootFont: bootFont) {
+    static func install(
+        on userContentController: WKUserContentController,
+        bootBackground: String,
+        bootFont: String?,
+        disableInputCompletion: Bool
+    ) {
+        for script in userScripts(
+            bootBackground: bootBackground,
+            bootFont: bootFont,
+            disableInputCompletion: disableInputCompletion
+        ) {
             userContentController.addUserScript(script)
         }
     }
 
     /// Everything the shell injects, in the order the web view should run it.
-    private static func userScripts(bootBackground: String, bootFont: String?) -> [WKUserScript] {
+    private static func userScripts(
+        bootBackground: String,
+        bootFont: String?,
+        disableInputCompletion: Bool
+    ) -> [WKUserScript] {
         var scripts = [
             // First, so the page boots as a desktop shell and the shortcut service sees it.
             atStart(desktop),
             // Then the very first frame already carries the theme instead of the app's default.
             atStart(bootBackgroundScript(bootBackground, bootFont: bootFont)),
             atStart(appVersionScript),
+            atStart(inputCompletionDefault(disableInputCompletion)),
             atStart(console),
         ]
         scripts += [
             atStart(directoryPicker),
             atStart(titleBar),
+            atStart(glass),
+            atStart(backdrop),
             atStart(palette),
             atStart(appIcon),
             atEnd(dragZone),
