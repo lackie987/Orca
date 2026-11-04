@@ -14,6 +14,11 @@ final class WindowChrome {
     /// sit 9pt above the toggle / new-session icons without this drop.
     private static let lightsDrop: CGFloat = 9
 
+    /// How long the lights take to appear or leave. One number for both directions: the reveal and
+    /// the exit are the same motion seen backwards, and two constants drift apart the moment one of
+    /// them is retuned.
+    private static let lightsFadeDuration: TimeInterval = 0.35
+
     private let window: NSWindow
     private var hoverBand: HoverBandView?
     private var hideLightsWorkItem: DispatchWorkItem?
@@ -157,9 +162,9 @@ final class WindowChrome {
         cancelLightsFade()
     }
 
-    /// Shows or hides the traffic lights with the shared dissolve; exits are delayed before fading
-    /// so the pointer can travel from the band onto a button without the lights vanishing
-    /// underneath it.
+    /// Reveals the lights with the shared dissolve and hides them with the stepped fade; the exit is
+    /// delayed first, so the pointer can travel from the band onto a button without the lights
+    /// vanishing underneath it.
     private func showLights(_ visible: Bool) {
         hideLightsWorkItem?.cancel()
         hideLightsWorkItem = nil
@@ -183,9 +188,6 @@ final class WindowChrome {
     }
 
     // MARK: - Exit fade
-
-    /// How long the lights take to leave once the pointer has gone.
-    private static let lightsFadeOutDuration: TimeInterval = 0.35
 
     /// Frame-stepped exit fade; nil when none is running.
     private var lightsFadeTimer: Timer?
@@ -227,7 +229,7 @@ final class WindowChrome {
             cancelLightsFade()
             return
         }
-        let progress = min(1, (CACurrentMediaTime() - lightsFadeStarted) / Self.lightsFadeOutDuration)
+        let progress = min(1, (CACurrentMediaTime() - lightsFadeStarted) / Self.lightsFadeDuration)
         // Ease-out: let go of full opacity at once, take the time to reach zero.
         let eased = 1 - pow(1 - progress, 3)
         for button in buttons {
@@ -247,27 +249,17 @@ final class WindowChrome {
         lightsFadeTimer = nil
     }
 
-    /*
-    /// Original animation, kept for reference while the dissolve is tuned.
-    private static func fade(_ buttons: [NSButton], to alpha: CGFloat, completion: (() -> Void)? = nil) {
-        NSAnimationContext.runAnimationGroup(
-            { context in
-                context.duration = 0.18
-                for button in buttons {
-                    button.animator().alphaValue = alpha
-                }
-            },
-            completionHandler: completion
-        )
-    }
-    */
-
-    /// Dissolves the given buttons as one group with a longer eased fade, used by both the hover
-    /// band and display-mode switches. Runs `completion` after the animation ends.
+    /// Dissolves the given buttons as one group with an eased fade, for both the hover band and the
+    /// display-mode switches. Runs `completion` after the animation ends.
+    ///
+    /// This replaced the plain 0.18s `fade` of the first traffic-light pass, which popped on the way
+    /// in and read as a cut on the way out. The exit has since moved to `fadeOutLights`, which steps
+    /// the alpha by hand; what is left here is the reveal and the mode switches, where a single
+    /// animation group is honoured.
     private static func dissolve(
         _ buttons: [NSButton],
         to alpha: CGFloat,
-        duration: TimeInterval = 0.35,
+        duration: TimeInterval = WindowChrome.lightsFadeDuration,
         completion: (() -> Void)? = nil
     ) {
         NSAnimationContext.runAnimationGroup(

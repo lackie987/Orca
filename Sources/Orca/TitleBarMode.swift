@@ -6,7 +6,7 @@ import Foundation
 /// strip; `hidden` makes them invisible with the page full-bleed; `hover` reveals them while the
 /// pointer is in the top band; `shown` restores the standard titled chrome. The raw value is
 /// persisted under UserDefaults `titleBarMode`.
-enum TitleBarMode: String, CaseIterable {
+enum TitleBarMode: String {
     case hidden
     case hover
     case lightsOnly
