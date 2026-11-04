@@ -76,8 +76,9 @@
 | P10 | `dsh-patch` 的 open-in-app 主按钮同时带 `title` 与 `aria-label`（值相同） | 2026-11-04 | 有意：主按钮是纯图标，`title` 是 rose-pine 自绘气泡提示的**输入源**（无主题时才回落系统 tooltip），`aria-label` 负责无障碍。删 `title` 会把气泡一起删掉，不是「又一处原生 title 滥用」 | `src/client/dropdown.ts:513-516`、`README.md`（菜单小节） |
 | P11 | `ElectronShortcuts.swift` 整文件都是注释（81 行，零可执行代码） | 2026-11-04 | 有意留档，不是忘删：README 第 148 行写明「Electron 默认菜单的对照表保留在 `ElectronShortcuts.swift`，当前仅作决策记录，没有消费者」。它记的是「Electron 默认组合 ↔ Orca 动作 ↔ 哪两处故意不一致（`forceReload` 归服务重启、开发者工具走 F12）」。别再当死文件清掉；真要清，先把这张表挪进 docs 再删文件 | `Sources/Orca/ElectronShortcuts.swift:1-11,12-81`、`README.md:148` |
 | P12 | `TitleBarMode.shown`（第四档） | 2026-11-04 | 保留为占位档，壳与插件都不要再给它加 UI 或布局：语义上它是「标准标题栏」，而壳不画系统标题栏（页面标题条就是标题行）。`WindowChrome.apply` 里它与 `lightsOnly` 共用分支，只是为了让旧偏好里的 `"shown"` 不跳变。删掉它没有收益（要改持久化值解析），实现它则违背窗口设计 | `TitleBarMode.swift:13-21`、`WindowChrome.swift:40-45`、`README.md:109-114`、`dsh-orca-titlebar/client.js:46-53` |
-| P13 | 红绿灯那一行的标题：插件卡片叫「Orca 红绿灯」，设置行里只有「红绿灯」 | 2026-11-04 | 不改，**有意**：设置行本身就在「Orca 设置」里，行内再带产品名是重复；卡片是插件列表，才需要说明归属。两个名字分别在各自上下文里最短且无歧义 | `locale/zh.json:3`（卡片）vs `client.js:58`（行） |
-| P14 | `dsh-app-icon` 的 hint「选择要使用的图标」只说图标这一维，同行的第二个下拉（跟随）没被提及 | 2026-11-04 | 不改，**没必要**：hint 只负责「这一行在选什么」，跟随由第二个下拉自己的标签承担；把一种情况写进总述反而让 hint 变成没说完的清单。四个候选方案（说结果 / 说来源 / 合并成一项 / 删掉 hint）一并作废，不再提 | `dsh-app-icon/client.js:79` |
+| P13 | 红绿灯那一行的标题：插件卡片叫「Orca 红绿灯」，设置行里只有「红绿灯」 | 2026-11-04 | 不改，有意：设置行本身就在「Orca 设置」里，行内再带产品名是重复；卡片是插件列表，才需要说明归属。两个名字分别在各自上下文里最短且无歧义 | `locale/zh.json:3`（卡片）vs `client.js:58`（行） |
+| P14 | `dsh-app-icon` 的 hint「选择要使用的图标」只说图标这一维，同行的第二个下拉（跟随）没被提及 | 2026-11-04 | 不改，没必要：hint 只负责「这一行在选什么」，跟随由第二个下拉自己的标签承担；把一种情况写进总述反而让 hint 变成没说完的清单。四个候选方案（说结果 / 说来源 / 合并成一项 / 删掉 hint）一并作废，不再提 | `dsh-app-icon/client.js:79` |
+| P15 | Dock 磁贴换图标后「落后一拍」（尤其退出 Orca 后翻系统浅色/深色） | 2026-11-04 | 不是 bug，是 macOS 的图标缓存：Dock 画的是 LaunchServices 按 bundle id 缓存的位图，运行中改 `applicationIconImage` 实时生效，进程退出后没人再推快照，只能等下次启动或重启 Dock。不要再为它加刷新手段（重设图标、抖 bundle 时间戳、kill Dock），那只是追缓存时机；一致的路径是写 bundle 的 `AppIcon.icns` + 下次启动读它，已在。这条已写进插件的 README 开头 | `dsh-app-icon/README.md:5-12`、`AppIconInstaller.swift:54-58` |
 
 ### 3.3 分析器（跑过，结论明确）
 
