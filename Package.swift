@@ -8,6 +8,10 @@ let package = Package(
         .executableTarget(
             name: "Orca",
             path: "Sources/Orca"
+        ),
+        .executableTarget(
+            name: "orca-icon-sync",
+            path: "Sources/orca-icon-sync"
         )
     ]
 )

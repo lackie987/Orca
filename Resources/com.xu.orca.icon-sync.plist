@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.xu.orca.icon-sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__INSTALL_DIR__/Orca.app/Contents/MacOS/orca-icon-sync</string>
+    </array>
+    <!-- The helper stays resident: it answers the system's appearance notification itself, which
+         a WatchPaths entry on the cfprefs plists could not do reliably (cfprefsd decides when, or
+         whether, those files reach the disk). -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>WorkingDirectory</key>
+    <string>/tmp</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/orca-icon-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/orca-icon-sync.log</string>
+</dict>
+</plist>
