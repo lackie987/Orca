@@ -40,6 +40,8 @@
 | M8 | Orca 红绿灯旧代码 | 删掉 `WindowChrome` 里整块注释的首版 `fade`（0.18s，`/* … */` 12 行）。它被 `setLightsHidden` + `dissolve`（进场）与 `fadeOutLights`（退场逐帧步进）取代，注释里留下的只有一个时长数字；「为什么退场不能用 `animator().alphaValue`」已写在 `fadeOutLights` 的注释里，代码本体可从 `56f6081^` 取回。同时把退场时长与 `dissolve` 默认值两处 0.35 合成 `lightsFadeDuration`，`dissolve` / `showLights` 的注释按现状改写（退场早已不共用 dissolve），`TitleBarMode` 去掉没人消费的 `CaseIterable` | 2026-11-04 | 已改，`swift build` 通过；`rg "0\.18\|lightsFadeOutDuration\|static func fade"` 只剩注释里那句历史说明 | `WindowChrome.swift`（`lightsFadeDuration`、`dissolve`、`fadeOutLights`）、`TitleBarMode.swift:9` |
 | M9 | Orca 红绿灯（`shown` 档） | 曾按「三档已覆盖所有布局」删掉第四档，随后按需求恢复为**占位**：`case shown` 回来了，但它不再绘制标准标题栏，`WindowChrome.apply` 里与 `lightsOnly` 共用分支；只服务旧实现的 `usesWebTitleStrip`、`restoreLightsBaseline()`、`setChrome` 的 `transparent` 参数**没有**跟着回来。README 与插件注释按「占位」口径重写 | 2026-11-04 | 已改（最终态：三档可用 + 一个占位档），`swift build` 通过 | `TitleBarMode.swift:13-21`、`WindowChrome.swift:40-45`、`README.md:109-114`、`dsh-orca-titlebar/client.js:46-53` |
 
+| M10 | Orca 版本 | `CFBundleShortVersionString` 1.1.0 → 1.2.0、`CFBundleVersion` 2 → 3：自 `2b0ac5b`（1.1.0）以来 22 个提交、50 个文件，且含新增能力（壳的界面语言可切换、orca-icon-sync 与图标成品交接），按「有新增能力走次版本号」定 1.2.0 | 2026-11-06 | 已改，`plutil -lint` 通过；装进 `/Applications` 后需重开 Orca 才看得到新版本号 | `Resources/Info.plist:19-22`、`git rev-list --count 2b0ac5b..HEAD` |
+
 ---
 
 ## 3. 已检查 · 不改（别再重复整理）
@@ -56,7 +58,7 @@
 | C6 | `ThemeColor.swift` 与 `ColorHex.swift` 是否重复 | 2026-11-04 | 不重复也不该合并：前者推导启动底色，后者只做 hex ↔ NSColor 互转 | 两个文件全文 |
 | C7 | 标题栏档位与默认值 | 2026-11-04 | 三档可用（`hidden` / `hover` / `lightsOnly`），默认 `lightsOnly`，与 README 一致；`shown` 是占位档，渲染同 `lightsOnly`（见 P12） | `TitleBarMode.swift:13-21` |
 | C8 | 图标预设数量 | 2026-11-04 | 6 个 id（`orca`、`dawn`、`main`、`moon`、`template`、`custom`），其中 dawn / main / moon 才算「随外观」的成品，`template`、`custom` 是动态来源；README「六个预设加自选图片」表述含糊但不算错 | `AppIcon.swift:24-27` |
-| C9 | `__ORCA_APP_VERSION__` 与「Orca 版本：v{version}」是否会出现双 `v` | 2026-11-04 | 不会：注入值取自 `CFBundleShortVersionString`（当前 `1.1.0`，不带 `v`） | `WebPageScripts.swift:70,78`、`Resources/Info.plist:19-20` |
+| C9 | `__ORCA_APP_VERSION__` 与「Orca 版本：v{version}」是否会出现双 `v` | 2026-11-06 | 不会：注入值取自 `CFBundleShortVersionString`（当前 `1.2.0`，不带 `v`） | `WebPageScripts.swift:70,78`、`Resources/Info.plist:19-22` |
 | C10 | README 的构建/打包参数与脚本是否一致 | 2026-11-04 | 一致：`--no-install`、`--no-pkg`、`--no-dmg`、`ORCA_INSTALL_DIR`、`ORCA_SIGN_IDENTITY` 都在脚本里 | `build.sh:1-20`、`package.sh:5-12` |
 | C11 | README「当前只构建 arm64」 | 2026-11-04 | 属实：`swift build` 未传 `--arch`/`--triple`，只出宿主架构 | `build.sh:20-22` |
 
