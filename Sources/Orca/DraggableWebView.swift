@@ -56,4 +56,61 @@ final class DraggableWebView: WKWebView {
         pressedInDragZone = false
         super.mouseUp(with: event)
     }
+
+    // MARK: - Key equivalents
+
+    /// The page must not swallow a combination the shell's own menu already draws.
+    ///
+    /// `WKWebView` answers `true` to `performKeyEquivalent` for combinations the page prevents —
+    /// dsh is an Electron app, so its page carries a keyboard layer of its own. That took ⌘W away
+    /// from the File menu: the item stayed visible and enabled while `performClose:` never ran, so
+    /// the shortcut looked broken. Declining the combination here lets AppKit's normal dispatch
+    /// reach the item that draws it, which keeps the menu the single place a shortcut executes.
+    ///
+    /// Only items the menu visibly lists count. AppKit also installs hidden duplicates (⌘F next to
+    /// ⌘⌃F, for instance) that exist for another app's convention; those must keep losing to the
+    /// page, or a shortcut the page owns would silently toggle something else.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if Self.menuClaims(event) { return false }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    /// Whether a visible item of the main menu carries this combination.
+    ///
+    /// Matching only reads the menu; a disabled item still claims its key, and letting the menu
+    /// answer keeps one execution path instead of running an action from inside the web view.
+    private static func menuClaims(_ event: NSEvent) -> Bool {
+        guard let main = NSApp.mainMenu,
+              let key = event.charactersIgnoringModifiers?.lowercased(),
+              !key.isEmpty
+        else { return false }
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        func search(_ menu: NSMenu) -> Bool {
+            for item in menu.items {
+                if let action = item.action, editingActions.contains(NSStringFromSelector(action)) {
+                    // The focused editor answers these, and the page's editor is not the same one
+                    // WebKit reaches: ⌘Z resolves to the window's undo manager, not the composer's.
+                    continue
+                }
+                if !item.isHidden,
+                   !item.keyEquivalent.isEmpty,
+                   item.keyEquivalent.lowercased() == key,
+                   item.keyEquivalentModifierMask == flags {
+                    return true
+                }
+                if let submenu = item.submenu, search(submenu) { return true }
+            }
+            return false
+        }
+        return search(main)
+    }
+
+    /// The menu's editing commands, which stay with whatever holds focus.
+    ///
+    /// These are the only combinations the page keeps even though the menu draws them: the shell
+    /// has nothing to add to a copy or an undo, and taking them would change which implementation
+    /// of the command runs inside the page's own editors.
+    private static let editingActions: Set<String> = [
+        "undo:", "redo:", "cut:", "copy:", "paste:", "selectAll:",
+    ]
 }

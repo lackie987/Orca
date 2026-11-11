@@ -9,7 +9,7 @@ enum MainMenu {
         let mainMenu = NSMenu()
 
         mainMenu.addItem(applicationMenu(appDelegate, copy))
-        mainMenu.addItem(fileMenu(window, copy))
+        mainMenu.addItem(fileMenu(window, appDelegate, copy))
         mainMenu.addItem(editMenu(copy))
         mainMenu.addItem(viewMenu(window, copy))
         mainMenu.addItem(serviceMenu(window, appDelegate, copy))
@@ -58,9 +58,16 @@ enum MainMenu {
         return wrap(menu, title: "Orca")
     }
 
-    private static func fileMenu(_ window: MainWindowController, _ copy: ShellCopy) -> NSMenuItem {
+    private static func fileMenu(
+        _ window: MainWindowController,
+        _ delegate: AppDelegate,
+        _ copy: ShellCopy
+    ) -> NSMenuItem {
         let menu = NSMenu(title: copy.menu.file)
-        menu.add(title: copy.menu.closeWindow, action: #selector(NSWindow.performClose(_:)), key: "w", target: nil)
+        // The shell's own action rather than `performClose:`: that one clicks the standard close
+        // button, which this window keeps disabled by hiding its traffic lights, so the item was a
+        // no-op that only looked wired. See `AppDelegate.closeWindow`.
+        menu.add(title: copy.menu.closeWindow, action: #selector(AppDelegate.closeWindow(_:)), key: "w", target: delegate)
         menu.addItem(.separator())
         menu.add(
             title: copy.menu.openInBrowser,
@@ -164,7 +171,10 @@ enum MainMenu {
 
     private static func windowMenu(_ copy: ShellCopy) -> NSMenuItem {
         let menu = NSMenu(title: copy.menu.window)
-        menu.add(title: copy.menu.minimize, action: #selector(NSWindow.performMiniaturize(_:)), key: "m", target: nil)
+        // `miniaturize(_:)`, not `performMiniaturize:`: the latter simulates a click on the standard
+        // minimise button, so it went silent whenever AppKit had that button disabled — which the
+        // hidden traffic lights used to cause. See `WindowChrome.hideLightsKeepingThemUsable`.
+        menu.add(title: copy.menu.minimize, action: #selector(NSWindow.miniaturize(_:)), key: "m", target: nil)
         menu.add(title: copy.menu.zoom, action: #selector(NSWindow.performZoom(_:)), target: nil)
         menu.addItem(.separator())
         menu.add(title: copy.menu.bringAllToFront, action: #selector(NSApplication.arrangeInFront(_:)), target: NSApp)
