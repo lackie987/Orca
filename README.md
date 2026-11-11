@@ -79,9 +79,9 @@ sequenceDiagram
     participant 壳 as Orca
     participant S as dsh web
     participant P as 页面
-    壳->>壳: 端口检查：回收残留 dsh 服务，无关程序才让位
-    壳->>S: dsh --profile … --port … --no-open
-    壳->>P: 开窗口，先显示原生启动页
+    壳->>壳: 端口检查：回收残留 dsh 服务，无关程序才让位（main.swift，早于 AppKit）
+    壳->>S: dsh --profile … --port … --no-open（或接管记录里的服务）
+    壳->>P: 建 NSApplication、窗口与启动页——与上面两行重叠
     S-->>壳: 端口可连
     壳->>P: 加载带 token 的页面地址
     P-->>壳: orcaPagePainted（load 后等两帧 rAF）
@@ -90,8 +90,33 @@ sequenceDiagram
 
 - **固定端口 4319** 让页面 origin 固定，localStorage 状态才能跨启动保留。端口被占用时先辨认占用者：残留的 `dsh web` 请它退出后继续用 4319；只有被无关程序占用才改用空闲端口。
 - **启动页**：磨砂玻璃上加页面主题 base，透明角色标按 app 图标的 squircle 裁形；文字与按钮按底色明暗取色，而不是按系统外观。页面首帧前只接受与已保存主题来源一致的底色，避免启动时闪错主题。
-- **交接**：页面首帧报告后才淡出，web view 本身不画背景，所以淡出时任何缝隙都是页面自己的底色。
-- **兜底**：`didFail*` 立即撤启动页；12 秒仍无首帧也强行撤。服务失败时显示原因与 Try Again / Service Log。
+- **交接**：只由页面首帧报告触发（`load` 之后两帧 rAF）。12 秒兜底只留给两种情况：文档永远不结束，和
+  刷新静默面收不回来——它不是给「报告迟到」准备的窗口。页面挂载自己的 shell 时主线程会被一整块占住，
+  那段忙的时间就是首帧报告的延迟，兜底提前交接只会把还没画的页面交出去。
+- **加载预算**：服务链在 `main.swift` 里启动，早于 `NSApplication` 初始化，所以接管探测（本机 0.4–0.5 秒）
+  和 `dsh web` 冷启动的 7–9 秒都压在 dyld、AppKit、窗口、启动页这一整段原生前奏下面，而不是排在它前面。
+  接管一旦核到端口归属就把地址交给窗口，健康探测降级为后台确认——它答不上来时走的是「接管的服务不再应答
+  → 重启一次」那条恢复路径，不再挡在页面前面。菜单之后的热键、外观观察和图标落盘让位给第一次导航：它们等
+  服务的第一个答复再跑，页面自己的加载与它们并行。
+  日志里 `[launch] … +秒数` 以进程启动为原点，逐段记到窗口、菜单、服务就绪、导航、commit、finish、图标和
+  交接（括号写明是页面报告还是兜底），一眼能看出时间花在哪一段。
+- **页面自己的启动块**：壳交接之后仍有约 1.5 秒主线程被一整块占住（`domContentLoaded` 到 `load`
+  之间没有心跳空档）。逐相位量过：分配模块系统 1ms，18 个 `immediately` 预取**全部**卡在同一时刻
+  （1542–1626ms），也就是两个组合包（3.94MB、88 个插件）解析执行完的那一瞬；挂载一个插件只要几毫秒。
+  所以这一段不是「插件太多导致的激活慢」，而是「代码必须先到齐」。`deferSecondaryPlugins`（默认关）
+  可以把只画设置页/工具面板的插件推到首帧之后再挂载，但实测首帧不动，因此它只是个开关，真正的杠杆在
+  dsh 侧：减少启动图里的插件，或把组合包按层拆开，让插件的代码在挂载时才到。
+- **静默面**：刷新、重连或 WebContent 崩溃恢复时，新文档 commit 到首帧之间没有东西可画（本机实测
+  0.3–1.3 秒），露出来的是窗口材质。这段由静默面接管：材质与启动页同一套——窗口内磨砂加页面主题 base、
+  随主题改色——上面只有一枚压暗的标志，没有进度条也没有文字。平铺一整页底色是它的第一版，读起来像页面
+  加载失败；磨砂才是「壳在替你把窗口按住」的观感。首帧报告后淡出；静默面只垫在已经撤掉的启动页之下，
+  启动页与服务重启仍归服务状态管。
+- **静默面的两个入口**：① 新文档 commit；② WebContent 进程退出——视图从那一刻就空了，而重启是延迟的
+  （1–2 秒）再加一次导航，所以覆盖必须从终止回调开始，不能等下一次 commit。仅此两处：壳不去「探测」
+  页面还能不能画，因为一个只是忙（主线程长任务、唤醒后重绘）的页面答得慢，而把答得慢当成死会白重载一次
+  并丢掉滚动位置和输入状态——WebKit 自己会在进程真的没了时报终止。
+- **兜底**：`didFail*` 立即撤启动页；导航开始后 12 秒仍无首帧就强行撤（静默面同样受约束，否则一次永不
+  提交的重载会把窗口永久按住）。服务失败时显示原因与 Try Again / Service Log。
 - **重启服务**（⇧⌘R、改设置或启动页按钮）复用同一张启动页，只显示进度条。
 
 ## 服务与端口
@@ -213,11 +238,14 @@ F12 或 ⌥⌘I 打开 WebKit 自带 Web Inspector（Elements / Console / Source
 
 | 路径 | 内容 |
 | --- | --- |
-| `~/Library/Logs/Orca/service.log` | `dsh web` 的 stdout/stderr，含访问 URL 与 token，分享前脱敏 |
+| `~/Library/Logs/Orca/service.log` | `dsh web` 自己写入的 stdout/stderr，Orca 退出后仍继续写；含访问 URL 与 token，分享前脱敏 |
 | `~/Library/Logs/Orca/web.log` | 页面 console.error 与未捕获异常 |
-| `~/Library/Application Support/Orca/session.json` | 服务 pid + 访问 URL（0600） |
+| `~/Library/Application Support/Orca/session.json` | 服务 pid + 访问 URL（0600），仅用于下次启动重连 |
+| `~/.dsh/state/orca-service.json` | 常驻服务的可发现端点：pid、访问 URL、token 签发时间（0600） |
 | `~/Library/Application Support/Orca/keybindings.json` | DSH 桌面快捷键覆盖 |
 | `~/Library/Application Support/Orca/app-icon.png` | 自选应用图标 |
+
+终端取用已运行的服务时读 `orca-service.json` 的 `url` 字段即可，不必再启动第二个 `dsh web` 抢同一个端口。重启本地服务会签发新 token，并同步更新两个记录。
 
 ## 源码导航
 
