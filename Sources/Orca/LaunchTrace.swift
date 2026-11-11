@@ -24,8 +24,8 @@ enum LaunchTrace {
         _ = start
     }
 
-    /// Seconds since `begin()`.
-    static func elapsed() -> TimeInterval {
+    /// Seconds since `begin()`, for the marks this enum writes.
+    private static func elapsed() -> TimeInterval {
         Date().timeIntervalSince(start)
     }
 
