@@ -8,9 +8,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let inspector: InspectorController
     private let chrome: WindowChrome
     private let splash = SplashView()
-    private var loadedURL: URL?
+    // Retired: the ready path compared this URL to decide whether to load again. It answered "did we
+    // ever ask for this URL", not "is that document still on screen" — and two `.ready` states for
+    // one URL only ever differ when the document was replaced in between. `hasRevealedPage` together
+    // with `page.isRevealed` answers the real question; kept here for reference in case a second
+    // window ever needs to know which URL this one was navigated to.
+    // private var loadedURL: URL?
     /// True once a page has been shown at least once, so the splash knows a live page sits behind it.
+    ///
+    /// Not the same as `page.isRevealed`, which answers whether the *current* document has reported
+    /// a frame: a reload clears that one and leaves this true, which is what tells the shell the
+    /// blank stretch belongs to a reload and needs the quiet cover.
     private var hasRevealedPage = false
+    /// True while the quiet cover for a reload's blank document is up.
+    private var quietShown = false
+    /// True while the splash is showing a state the *service* asked for — starting, stopped, failed.
+    ///
+    /// A reload and a service restart look identical from the page's side: both commit a new
+    /// document. Only the restart already has the full startup surface up, with a reason on it, so
+    /// the page must not replace that with the wordless cover.
+    private var splashOwnedByService = false
     /// Vibrancy under everything: the page keeps its own background clear once the wallpaper patch
     /// is active, so translucent surfaces reveal the blurred desktop instead of a flat colour.
     private var backdropEffect: NSVisualEffectView?
@@ -28,13 +45,50 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// The page and the startup surface, i.e. everything the developer-tools panel takes space from.
     /// Safety net for a page that never reports it finished; the surface must not outlive it forever.
     private var revealFallback: DispatchWorkItem?
+    // Retired: the wake / occlusion probe. It asked the page for an animation frame after every
+    // long absence and restarted the WebContent process when no frame came back. The question
+    // cannot be asked cheaply or safely: a page that is merely busy (a long task on its main
+    // thread, a heavy repaint after a wake) answers late and was reloaded for it, which costs
+    // 0.9-1.3s and the page's scroll and input state. WebKit already reports the case that matters
+    // — `webViewWebContentProcessDidTerminate` — and that is what the cover hangs off now.
+    //
+    // Kept because a probe is the only way to detect a page whose process is alive but cannot
+    // draw; if a reliable signal ever appears, the shape to restore is: throttle (3s), require
+    // `NSApp.isActive` and a visible window, and treat a missing answer as "unknown", not "dead".
+    // private var occludedSince: Date?
+    // private var inactiveSince: Date?
+    // private var lastResumeCheck = Date.distantPast
     /// True while the page is being asked whether a close would interrupt work.
     private var closeDecisionPending = false
-    /// True for the close this window performs itself, after the guard has been satisfied.
-    private var closeAllowed = false
+    /// Retired with the move off `performClose:` — nothing re-enters `windowShouldClose` for a close
+    /// the shell performs itself, so the flag no longer has a second pass to allow.
+    ///
+    /// Kept commented in case a future path hands the close back to AppKit, where the re-entry
+    /// (`windowShouldClose` asked once, then again by the close itself) would be needed again.
+    // private var closeAllowed = false
+
+    /// Fires once when the service first answers with something other than "starting".
+    ///
+    /// The launch's native tail (the hotkey surface, the appearance observer, the icon pass) waits
+    /// for this: it is native work that has nothing to ask of the page, and running it before the
+    /// answer sits between the service and the document that answer is for.
+    var onServiceAnswered: (() -> Void)?
+    /// Whether {@link onServiceAnswered} has fired. One answer per launch.
+    private var didAnnounceService = false
 
     /// Longest the startup surface waits for a page that is loading but never finishes.
     private static let revealTimeout: TimeInterval = 12
+
+    /// Dissolve of the quiet cover. Shorter than the startup surface's: the page underneath is
+    /// already painting by the time it comes off.
+    private static let quietFadeOut: TimeInterval = 0.22
+
+    // Retired with the probe: the frame timeout, the absence it measured and the spacing between
+    // two probes. All three only existed to keep one question — "can the page still draw?" — from
+    // being asked too often or answered too eagerly.
+    // private static let resumeProbeTimeout: TimeInterval = 2
+    // private static let resumeGrace: TimeInterval = 20
+    // private static let resumeCheckSpacing: TimeInterval = 3
 
     init(service: ServiceController, preferences: Preferences) {
         self.service = service
@@ -85,6 +139,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         fatalError("Orca does not support nib loading")
     }
 
+    // The observer cleanup went with the probe it existed for: nothing here observes a notification
+    // any more, and a `deinit` that removes observers none were added to is noise. Restore it
+    // alongside any future `addObserver(self, …)`.
+    // deinit {
+    //     NSWorkspace.shared.notificationCenter.removeObserver(self)
+    //     NotificationCenter.default.removeObserver(self)
+    // }
+
     // MARK: - Presentation
 
     func present() {
@@ -102,11 +164,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Menu actions
 
     @objc func reloadPage(_ sender: Any?) {
+        guard canReloadPage else { return }
         page.reload()
     }
 
     @objc func reloadFromOrigin(_ sender: Any?) {
+        guard canReloadPage else { return }
         page.reloadFromOrigin()
+    }
+
+    /// Whether a manual reload has a URL worth re-fetching.
+    ///
+    /// Reloading while the service is starting or gone points the web view at a token that is being
+    /// replaced, and the failure that follows would overwrite the startup surface's own reason with
+    /// a page error. Those states already offer their own retry.
+    private var canReloadPage: Bool {
+        if case .ready = service.state { return true }
+        return false
     }
 
     @objc func zoomIn(_ sender: Any?) {
@@ -172,44 +246,45 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Window delegate
 
-    /// Holds a close while the page still has work running.
+    /// Answers AppKit's own close request — the red light, once the page's title band reveals it.
     ///
-    /// This is the reason the close guard never worked in the shell: ⌘W is the menu's key equivalent
-    /// and the red button is AppKit's, so the page never sees either, and dismissing a window does
-    /// not unload a WKWebView — `beforeunload` is not consulted at all. The decision therefore has to
-    /// be made here, by asking the page (which asks the host, so a turn in *another* session counts
-    /// too) before the window goes away.
-    ///
-    /// Returning `false` keeps the window open until that answer arrives; the close is then performed
-    /// by `performClose`, which re-enters this method with the answer already accepted.
+    /// The answer is always `false`: {@link requestClose} performs the close once the page has
+    /// allowed it, so a veto leaves the window open instead of AppKit closing underneath it.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if closeAllowed { return true }
+        requestClose()
+        return false
+    }
+
+    /// Holds a close while the page still has work running, then closes the window.
+    ///
+    /// The decision has to be made here: ⌘W is the menu's key equivalent and the red light is
+    /// AppKit's, so the page never sees either, and dismissing a window does not unload a WKWebView
+    /// — `beforeunload` is not consulted at all. `askCloseGuard` asks the page, which asks the host,
+    /// so a turn in *another* session counts too.
+    ///
+    /// The close itself cannot be `performClose:`: that action simulates a click on the standard
+    /// close button, and this window keeps its traffic lights hidden behind the page's own title
+    /// band, which leaves that button disabled — the File menu's ⌘W then ran a silent no-op, with
+    /// no prompt and no close, exactly as if the shortcut were not wired at all.
+    func requestClose() {
+        guard !closeDecisionPending else { return }
         // Nothing is running until the page has been handed the window: the splash cannot be running
         // a session, and holding a close there would trap the user on an error screen.
-        guard hasRevealedPage, !closeDecisionPending else { return !closeDecisionPending }
+        guard hasRevealedPage else {
+            window?.close()
+            return
+        }
         closeDecisionPending = true
         page.askCloseGuard { [weak self] running, sessions in
             guard let self else { return }
             self.closeDecisionPending = false
             guard running else {
-                self.performGuardedClose()
+                self.window?.close()
                 return
             }
             self.askBeforeInterrupting(sessions: sessions) { proceed in
-                if proceed { self.performGuardedClose() }
+                if proceed { self.window?.close() }
             }
-        }
-        return false
-    }
-
-    /// Closes the window with the guard already satisfied.
-    private func performGuardedClose() {
-        closeAllowed = true
-        window?.performClose(nil)
-        // Reset on the next run loop turn so a cancelled close (a sheet, a veto from somewhere else)
-        // does not leave the window permanently closable.
-        DispatchQueue.main.async { [weak self] in
-            self?.closeAllowed = false
         }
     }
 
@@ -281,6 +356,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         chrome.alignTrafficLights()
     }
 
+    // Retired: the wake / occlusion / activation probe, and the delegate callback that timed how
+    // long the window was out of the compositor's sight. A window buried behind others produces no
+    // frames, and what the compositor reclaims in that state is reclaimed without telling the app —
+    // but every way of asking afterwards ("give me an animation frame") answers late for a page
+    // that is merely busy, and a late answer here means a reload of a page that was fine.
+    // `webViewWebContentProcessDidTerminate` reports the case that actually blanks the view.
+    // func windowDidChangeOcclusionState(_ notification: Notification) { … }
+    // @objc private func systemDidWake() { … }
+    // @objc private func applicationWillResignActive() { … }
+    // @objc private func applicationDidBecomeActive() { … }
+
     func windowDidEnterFullScreen(_ notification: Notification) {
         page.applyFullscreen(true)
     }
@@ -350,7 +436,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             self?.applySplashBase(hex)
         }
         page.onPagePainted = { [weak self] in
-            self?.revealPage()
+            self?.revealPage("page")
+        }
+        page.onPageCommitted = { [weak self] in
+            self?.coverBlankPage()
+        }
+        // A process that exits leaves the view empty from that instant, and the shell's restart is
+        // deliberately delayed — cover now, not when the replacement document commits.
+        page.onWebProcessTerminated = { [weak self] in
+            self?.coverBlankPage()
         }
         page.onPageLoadFailed = { [weak self] error in
             self?.handlePageLoadFailure(error)
@@ -366,7 +460,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             self.refreshWindowPlane()
         }
         page.onCloseWindow = { [weak self] in
-            self?.window?.performClose(nil)
+            // Same guard as the red light and ⌘W: the page asking is not proof that nothing is
+            // running, and `performClose:` would have been a no-op on the disabled close button.
+            self?.requestClose()
+        }
+        // The service chain starts in `main.swift`, before AppKit comes up, so a launch that adopts a
+        // running service can reach `.starting` or `.ready` before this window existed — and a state
+        // change with no callback attached is a state nobody ever hears. Applying the one it already
+        // reached hands that answer on. Later changes arrive through the callback above; both run on
+        // the main queue, so no state is delivered twice.
+        if service.state != .idle {
+            apply(service.state)
         }
     }
 
@@ -442,24 +546,42 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         splash.showsPageBehind = hasRevealedPage
         switch state {
         case .idle:
+            takeSurfaceForService()
             splash.showStopped()
         case .starting(let message):
+            takeSurfaceForService()
             splash.showStarting(message)
         case .ready(let url):
             // The surface stays up until the page has painted, so the hand-over never shows the
             // bare window. A reload is the only case that has to wait for the web view again.
             LaunchTrace.mark("service ready")
-            if loadedURL != url {
-                loadedURL = url
+            // A page that has been handed over and has not been replaced since *is* the document
+            // this URL describes, so a second `.ready` for it has nothing to load — and revealing it
+            // is right, because that document is still on screen.
+            if hasRevealedPage, page.isRevealed {
+                revealPage("already loaded")
+            } else {
                 LaunchTrace.mark("navigate")
                 page.load(url)
-                scheduleRevealFallback()
-            } else {
-                revealPage()
+                scheduleRevealFallback(after: Self.revealTimeout)
             }
         case .failed(let message):
+            takeSurfaceForService()
             splash.showFailure(message)
         }
+        // Announced last: the launch's native tail runs on this callback, and the document has to be
+        // on its way first — the tail is native work the page's own load should run alongside, not
+        // behind.
+        if !didAnnounceService, !state.isStarting {
+            didAnnounceService = true
+            onServiceAnswered?()
+        }
+    }
+
+    /// Marks the surface as the service's to speak through, which a reload cover must not override.
+    private func takeSurfaceForService() {
+        splashOwnedByService = true
+        quietShown = false
     }
 
     /// Re-renders the startup surface in the shell's current language.
@@ -482,6 +604,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         revealFallback?.cancel()
         revealFallback = nil
         hasRevealedPage = false
+        takeSurfaceForService()
+        // A relaunch is already under way — the service the page was handed stopped serving, or a
+        // child is still booting — and the surface is telling that story. A page failure on top of it
+        // would replace "reconnecting" with a dead end the user cannot act on.
+        if case .starting = service.state { return }
         let failure = error as NSError
         let reason = failure.localizedDescription.isEmpty
             ? "\((failure.domain)) \(failure.code)"
@@ -494,34 +621,95 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         revealFallback?.cancel()
         revealFallback = nil
         hasRevealedPage = false
+        takeSurfaceForService()
         splash.showPageFailure(preferences.copy.splash.webProcessLostDetail)
     }
 
-    /// Hands the window over to the page on the page's own paint report.
+    /// Covers a web view that has nothing to draw, whatever took the content away.
+    ///
+    /// The startup surface is the right cover for a launch, but it is gone for the rest of the
+    /// session — `dismiss()` only ever hides it — so every later blank had nothing over it and the
+    /// window's own material showed through: the bare shell, which is exactly the surface the shell
+    /// exists to hide. Two things empty the view:
+    ///
+    /// - a navigation committing (a reload, ⌘R, a new port). Until `didCommit` the old document is
+    ///   still composited, so this is the exact start of the gap and covering earlier would hide
+    ///   content that is still there;
+    /// - the WebContent process exiting. The view is empty from that instant, not from the commit of
+    ///   the reload that follows it — see the delayed restart in `WebPageController`. This is also
+    ///   the case a Mac that slept brings back: a process killed for memory pressure reports itself
+    ///   here when the window is drawn again, so nothing has to be probed for it.
+    ///
+    /// No delay in either: the gap is already open by the time the shell hears about it, and
+    /// waiting to see whether it closes would mean showing the material first and the cover
+    /// afterwards, i.e. flashing the very thing this exists to hide. A gap short enough to close
+    /// before the cover fades in ends with the cover at a fraction of its opacity, which reads as
+    /// nothing at all.
+    private func coverBlankPage() {
+        // A launch and a service restart keep the startup surface up, and it says more than this.
+        guard hasRevealedPage, !splashOwnedByService else { return }
+        quietShown = true
+        // Idempotent, and it revives a cover that is already dissolving — which is what a second
+        // ⌘R landing during the first one's fade-out needs.
+        splash.showQuiet()
+        // Nothing else releases this one: the service stays `ready` through a reload, and a process
+        // that never comes back never commits, so without a fallback a blank view would leave the
+        // cover up for good. The page's own report releases it as soon as there is something behind
+        // it, and this is the backstop for a document that never reports one.
+        scheduleRevealFallback(after: Self.revealTimeout)
+    }
+
+    /// Asks the page whether it can still draw, and covers it when it cannot.
+    ///
+    /// The shell has no native way to see that a page went blank while it was away, and most of the
+    /// time it has not: a window behind another one, or a Mac that slept, usually comes back with
+    /// its page intact. So this asks instead of assuming — an animation frame from the renderer — and
+    /// stays completely out of the way when the answer is a frame. Only a page that produces nothing
+    /// gets covered, and only then is a restart spent on bringing it back.
+    ///
+    /// AppKit fires several of these for one wake (system, display, window, app), hence the throttle.
+    // private func verifyPageAfterResume() { … }
+
+    /// Hands the window over to the page, and records which signal released it.
     ///
     /// The surface deliberately outlives the service becoming ready: the hand-over is an event from
-    /// content that has actually been drawn, not a duration to wait out.
-    private func revealPage() {
+    /// content that has actually been drawn, not a duration to wait out. `reason` goes into the
+    /// launch trace, because "the page reported a frame" and "the fallback gave up waiting" look
+    /// identical on screen and differ by ten seconds in the log.
+    /// - Parameter reason: which signal released the surface.
+    private func revealPage(_ reason: String) {
         revealFallback?.cancel()
         revealFallback = nil
         // A restart may have taken the service away again before the report arrived; keep the
         // surface up in that case rather than dissolving onto a page that is already being replaced.
         guard case .ready = service.state else { return }
         hasRevealedPage = true
-        LaunchTrace.mark("painted")
+        splashOwnedByService = false
+        LaunchTrace.mark("painted (\(reason))")
         // The page owns the window from here on; the palette bridge may trust its reports outright.
         page.notePageRevealed()
-        splash.dismiss()
+        if quietShown {
+            // The reload cover leaves faster than the startup surface: what is underneath has
+            // already painted, so it has nothing left to wait for.
+            quietShown = false
+            splash.dismiss(fade: Self.quietFadeOut)
+        } else {
+            splash.dismiss()
+        }
     }
 
-    /// Reveals the page even if it never reports finishing, so a hung load cannot trap the surface.
-    private func scheduleRevealFallback() {
+    /// Arms the last-resort reveal, replacing any earlier one.
+    ///
+    /// The page's own paint report is the signal that releases the surface; this is the backstop for
+    /// a document that never finishes, and for a reload whose cover would otherwise stay up.
+    /// - Parameter delay: seconds from now until the surface gives up waiting.
+    private func scheduleRevealFallback(after delay: TimeInterval) {
         revealFallback?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.revealPage()
+            self?.revealPage("fallback")
         }
         revealFallback = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealTimeout, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func applyTheme(_ source: String) {

@@ -80,6 +80,7 @@ extension WebPageController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         LaunchTrace.mark("committed")
+        onPageCommitted?()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

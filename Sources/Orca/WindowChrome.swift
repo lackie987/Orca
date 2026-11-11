@@ -83,6 +83,20 @@ final class WindowChrome {
         window.contentView?.additionalSafeAreaInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
     }
 
+    /// Hides the lights without leaving their alpha at zero.
+    ///
+    /// AppKit disables a standard window button whose `alphaValue` is 0 — it reads that as "not
+    /// shown" — and a disabled light takes the window's capabilities with it: `performClose:`,
+    /// `performMiniaturize:` and even a direct `miniaturize(_:)` become silent no-ops, so ⌘W and ⌘M
+    /// did nothing while their menu items looked perfectly wired. `isHidden` alone keeps them out
+    /// of sight, so the alpha goes back to 1 once the fade has landed.
+    private func hideLightsKeepingThemUsable(_ buttons: [NSButton]) {
+        for button in buttons {
+            button.isHidden = true
+            button.alphaValue = 1
+        }
+    }
+
     /// Switches the lights between visible and hidden with the dissolve, so display-mode changes
     /// and the hover band share one animation instead of popping.
     private func setLightsHidden(_ hidden: Bool) {
@@ -92,10 +106,8 @@ final class WindowChrome {
         hideLightsWorkItem = nil
         if hidden {
             guard buttons.contains(where: { !$0.isHidden }) else { return }
-            Self.dissolve(buttons, to: 0) {
-                for button in buttons {
-                    button.isHidden = true
-                }
+            Self.dissolve(buttons, to: 0) { [weak self] in
+                self?.hideLightsKeepingThemUsable(buttons)
             }
         } else {
             guard buttons.contains(where: { $0.isHidden || $0.alphaValue < 0.99 }) else { return }
@@ -193,7 +205,7 @@ final class WindowChrome {
         alignTrafficLights()
         lightsFadeFrom = buttons[0].alphaValue
         guard lightsFadeFrom > 0.001 else {
-            for button in buttons { button.isHidden = true }
+            hideLightsKeepingThemUsable(buttons)
             return
         }
         lightsFadeStarted = CACurrentMediaTime()
@@ -222,7 +234,7 @@ final class WindowChrome {
         alignTrafficLights()
         guard progress >= 1 else { return }
         cancelLightsFade()
-        for button in buttons { button.isHidden = true }
+        hideLightsKeepingThemUsable(buttons)
     }
 
     /// Stops a running exit fade; the caller decides the next alpha.

@@ -34,12 +34,27 @@ final class WebPageController: NSObject, InspectorPage {
     /// load ended, which happens before the compositor has a frame of the new document.
     var onPagePainted: (() -> Void)?
 
+    /// Fired when a new document commits, i.e. the moment the previous one stops being drawn.
+    ///
+    /// The other end of the same gap `onPagePainted` closes: a navigation keeps the old document on
+    /// screen until the new one commits, so this is the exact instant the window stops having
+    /// anything to show. A reload publishes nothing else at that point, and the web view paints no
+    /// background of its own, so what shows through is the window's material — the bare shell.
+    var onPageCommitted: (() -> Void)?
+
     /// Fired when the main frame gives up loading, so the startup surface never waits forever.
     ///
     /// The error travels with it: the surface used to be dismissed on this signal, leaving a blank
     /// window with no reason on screen and nothing in the log, so a revoked token looked exactly
     /// like a service that never finished booting.
     var onPageLoadFailed: ((Error) -> Void)?
+
+    /// Fired the instant the WebContent process exits, before any restart is attempted.
+    ///
+    /// The view has nothing to draw from this moment, and the shell's only other signal — the new
+    /// document's commit — arrives after the restart delay plus a navigation. That gap is seconds
+    /// long and used to show the window's material, i.e. the bare shell.
+    var onWebProcessTerminated: (() -> Void)?
 
     /// Fired when the WebContent process keeps exiting and the automatic restarts are used up.
     var onWebProcessLost: (() -> Void)?
@@ -226,7 +241,6 @@ final class WebPageController: NSObject, InspectorPage {
     }
 
     /// Loads the tokenized access URL printed by the service.
-    ///
     /// A new URL on a different port is a new origin, and WebKit keys `localStorage` by origin: the
     /// page would come up with an empty store and every plugin would fall back to its initial state.
     /// The old entries are therefore captured *before* the navigation starts — while the old document
@@ -285,6 +299,12 @@ final class WebPageController: NSObject, InspectorPage {
     /// Consecutive WebContent-process restarts since the page last rendered.
     private var contentProcessRestarts = 0
 
+    /// True between asking for a restart and the reload it schedules.
+    ///
+    /// Cleared when that reload starts, not when it paints: a replacement page that dies before its
+    /// first frame is a new failure and deserves a new attempt.
+    private var recoveryScheduled = false
+
     /// True while the page is being asked whether a close would interrupt running work.
     private var closeGuardInFlight = false
 
@@ -336,6 +356,17 @@ final class WebPageController: NSObject, InspectorPage {
         }
     }
 
+    // Retired: the "can you still draw?" probe.
+    //
+    // It asked the renderer for two animation frames and treated a missing answer as a dead page.
+    // The question cannot be answered reliably from here: a page that is merely busy — a long task
+    // on its main thread, a heavy repaint right after a wake — answers late, and a late answer was
+    // read as "blank", which reloaded a page that was fine and threw away its scroll and input
+    // state. Kept because it is the only way to detect an alive-but-blank renderer; if that ever
+    // becomes worth the false positives, the shape to restore is below, with the timeout treated as
+    // "unknown" rather than "dead".
+    // func verifyPainting(timeout: TimeInterval, completion: @escaping (Bool) -> Void) { … }
+
     /// How many times the shell restarts a WebContent process before it stops trying.
     private static let contentProcessRestartLimit = 2
 
@@ -349,6 +380,17 @@ final class WebPageController: NSObject, InspectorPage {
     /// kills its own process (memory pressure, a malformed document) therefore blinked white forever
     /// with nothing said. Two attempts with a growing gap, then the shell reports it.
     func recoverWebContentProcess() {
+        // A restart is already on its way. WebKit can report the same death more than once while
+        // the window is being redrawn, and a second restart would only replace the first reload
+        // with another one, burning an attempt from the limit on a page that is already being
+        // brought back.
+        guard !recoveryScheduled else { return }
+        recoveryScheduled = true
+        LaunchTrace.mark("content process exited")
+        // The view is empty now, not when the replacement document commits: the restart below is
+        // deliberately delayed, and a reload adds its own navigation on top. Anything the shell
+        // draws to cover a blank document has to start here or it misses that stretch entirely.
+        onWebProcessTerminated?()
         guard contentProcessRestarts < Self.contentProcessRestartLimit else {
             onWebProcessLost?()
             return
@@ -364,6 +406,9 @@ final class WebPageController: NSObject, InspectorPage {
         withCurrentBase {
             self.refreshUserScripts()
             self.notePageLoading()
+            // The restart this reload was asked for is under way; a page that dies from here on is
+            // a fresh failure rather than a duplicate of the one being repaired.
+            self.recoveryScheduled = false
             self.webView.reload()
         }
     }
@@ -380,13 +425,14 @@ final class WebPageController: NSObject, InspectorPage {
     /// theme instead of a colour stored on an earlier plane.
     private func withCurrentBase(_ body: @escaping () -> Void) {
         let lock = NSLock()
-        var finished = false
-        func finish() {
+        var claimed = false
+        /// Claims the single run: only the first caller may publish the sample and start the reload.
+        func claim() -> Bool {
             lock.lock()
-            let first = !finished
-            finished = true
-            lock.unlock()
-            if first { body() }
+            defer { lock.unlock() }
+            guard !claimed else { return false }
+            claimed = true
+            return true
         }
         let script = """
         (function () {
@@ -408,15 +454,20 @@ final class WebPageController: NSObject, InspectorPage {
         })()
         """
         webView.evaluateJavaScript(script) { [weak self] result, _ in
+            // A late answer describes the document the timeout already replaced, so it must not
+            // store the old plane on top of the reload it interrupted.
+            guard claim() else { return }
             if let self, let raw = result as? String, let hex = ColorHex.fromCSS(raw) {
                 // Same door as a palette report: one owner stores the plane and re-derives a
                 // theme-following icon when the colour really moved.
                 self.applyPaletteBase(hex)
             }
-            finish()
+            body()
         }
         // A hung web process must not turn the Reload command into a no-op.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { finish() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            if claim() { body() }
+        }
     }
 
     func zoomIn() {

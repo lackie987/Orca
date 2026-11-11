@@ -29,6 +29,15 @@ final class SplashView: NSView {
     /// Side of the icon slot above the title.
     private static let iconSide: CGFloat = 84
 
+    /// Side of the mark on the quiet surface: a mark that sits in the plane instead of announcing it.
+    private static let quietIconSide: CGFloat = 56
+
+    /// How much of the mark survives on the quiet surface.
+    private static let quietIconOpacity: CGFloat = 0.55
+
+    /// Fade-in of the quiet surface. Short, because it is covering a gap rather than opening a scene.
+    private static let quietFadeInDuration: TimeInterval = 0.18
+
     /// Default length of the dissolve from the startup surface to the page.
     private static let defaultFadeDuration: TimeInterval = 0.45
 
@@ -47,6 +56,17 @@ final class SplashView: NSView {
     private let buttonRow = NSStackView()
     private let retryButton = NSButton(title: "", target: nil, action: nil)
     private let logButton = NSButton(title: "", target: nil, action: nil)
+
+    /// The icon slot's size constraints, kept so the quiet surface can shrink the mark.
+    private var iconSideConstraints: [NSLayoutConstraint] = []
+
+    /// Bumped whenever the surface's appearance changes, so a dissolve that has been superseded
+    /// cannot hide what a newer state has just put up.
+    ///
+    /// Two ⌘R in a row is the case: the second commit raises the quiet surface while the first
+    /// one's dissolve is still running, and that dissolve's completion would otherwise mark the
+    /// surface hidden with the cover it just raised.
+    private var appearanceToken = 0
 
     /// The shell's copy table for the language in force when the surface is built.
     private var copy: ShellCopy { Preferences.shared.copy }
@@ -77,6 +97,44 @@ final class SplashView: NSView {
         spinner.startAnimation(nil)
         statusLabel.stringValue = message
         detailLabel.stringValue = ""
+    }
+
+    /// Covers a reload with the startup surface's own material and a dimmed mark.
+    ///
+    /// A reload replaces the document, and between the new one committing and its first painted
+    /// frame the web view has nothing to draw — it paints no background of its own, so that stretch
+    /// shows the window's vibrancy, i.e. the bare shell. The startup surface is long gone by then,
+    /// which is why the gap had no cover at all.
+    ///
+    /// It stays deliberately silent. A spinner would read as "the app is starting again" for a
+    /// reload of a few hundred milliseconds, and a sentence would claim more than the shell knows
+    /// while the new document has not reported anything yet. Only the mark remains, which says the
+    /// shell is holding the window without saying what for.
+    ///
+    /// The material is the startup surface's, not a flat fill: the same `withinWindow` frost under
+    /// the same published base colour, at the same strength the surface uses when a page sits behind
+    /// it. A flat opaque plane was the first version of this and it read as a page that had failed to
+    /// load — frost is what makes it read as the shell holding the window. The base follows the theme
+    /// because it is `baseColor`, repainted by the palette bridge like every other state.
+    func showQuiet() {
+        let appearing = isHidden
+        surface(buttonsHidden: true)
+        setQuiet(true)
+        spinner.stopAnimation(nil)
+        spinner.isHidden = true
+        // Frost showing through the fill, exactly as on a restart: nothing is behind the splash yet,
+        // so the window's own plane is what the material has to work with, and letting a sliver of it
+        // through is what gives the surface its texture instead of a painted rectangle.
+        showsPageBehind = true
+        guard appearing, fadeDuration > 0 else { return }
+        // Under a fade rather than a cut: the window was showing the material a frame ago, and a
+        // plane that snaps down over it reads as a flash of its own.
+        alphaValue = 0
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.quietFadeInDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            animator().alphaValue = 1
+        }
     }
 
     /// Draws the startup icon: the transparent character mark, in the app icon's own silhouette.
@@ -127,10 +185,40 @@ final class SplashView: NSView {
     }
 
     /// Brings the surface back to full opacity for every state, with the action row on or off.
+    ///
+    /// This is also where the quiet surface's changes are undone: every other state speaks, so the
+    /// copy and the full-sized mark are restored here rather than in each of them.
     private func surface(buttonsHidden: Bool) {
+        appearanceToken += 1
         isHidden = false
-        alphaValue = 1
+        // Through the animator with no duration, not by assigning: a dissolve from the state this
+        // replaces may still be running, and its end value would otherwise win over the alpha set
+        // here. A zero-length animation on the same property supersedes it, and the superseded
+        // completion is dropped by `appearanceToken`.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            animator().alphaValue = 1
+        }
         setButtonsHidden(buttonsHidden)
+        setQuiet(false)
+    }
+
+    /// Switches between the two looks the surface has: the full one, and the wordless one.
+    /// - Parameter quiet: true to take the copy away and shrink the mark.
+    private func setQuiet(_ quiet: Bool) {
+        for label in [titleLabel, subtitleLabel, statusLabel, detailLabel] as [NSTextField] {
+            label.isHidden = quiet
+        }
+        setIconSide(quiet ? Self.quietIconSide : Self.iconSide)
+        iconView.alphaValue = quiet ? Self.quietIconOpacity : 1
+    }
+
+    /// Resizes the mark's slot.
+    /// - Parameter side: edge length in points.
+    private func setIconSide(_ side: CGFloat) {
+        for constraint in iconSideConstraints {
+            constraint.constant = side
+        }
     }
 
     /// Fades the surface out.
@@ -138,14 +226,19 @@ final class SplashView: NSView {
     /// The call *is* the hand-over event: the page reports its first painted frame and the shell
     /// dissolves on that report, so nothing here waits for a duration to elapse first. Only the
     /// length of the dissolve lives here, and it collapses to none under Reduce Motion.
-    func dismiss() {
+    /// - Parameter fade: how long the dissolve runs. The startup surface keeps its own length; the
+    ///   reload cover asks for a shorter one, because it arrives over a page that is already
+    ///   painting rather than over an empty window.
+    func dismiss(fade: TimeInterval? = nil) {
         guard !isHidden else { return }
+        appearanceToken += 1
+        let token = appearanceToken
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = fadeDuration
+            context.duration = fadeDuration > 0 ? (fade ?? fadeDuration) : 0
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             animator().alphaValue = 0
         } completionHandler: { [weak self] in
-            guard let self else { return }
+            guard let self, token == self.appearanceToken else { return }
             // The surface is only ever hidden, never torn down, so a spinner left running keeps
             // animating for the rest of the session — inside a window that sits on a live
             // `behindWindow` blur, which turns that animation into a per-frame recomposite of the
@@ -199,10 +292,11 @@ final class SplashView: NSView {
 
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
+        iconSideConstraints = [
             iconView.widthAnchor.constraint(equalToConstant: Self.iconSide),
             iconView.heightAnchor.constraint(equalToConstant: Self.iconSide),
-        ])
+        ]
+        NSLayoutConstraint.activate(iconSideConstraints)
         applyIcon()
 
         titleLabel.font = .systemFont(ofSize: 25, weight: .semibold)
