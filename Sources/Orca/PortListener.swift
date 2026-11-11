@@ -25,13 +25,18 @@ enum PortListener {
     /// Every process currently running, in the order `proc_listallpids` returns them.
     private static func allPIDs() -> [Int32] {
         // Start above the usual process count so one call answers most machines; grow until it fits.
+        //
+        // `proc_listallpids` answers the number of pids it wrote — not bytes, unlike `proc_pidinfo` —
+        // and it truncates silently when the buffer is too small. Reading its answer as a byte count
+        // kept only the first quarter of the machine's process list, so the port the service actually
+        // listens on was almost never in the walk and this lookup quietly returned nil for a port
+        // that was serving.
         var capacity = 2048
         while capacity <= 65_536 {
             var buffer = [Int32](repeating: 0, count: capacity)
-            let used = Int(proc_listallpids(&buffer, Int32(capacity * MemoryLayout<Int32>.stride)))
-            guard used > 0 else { return [] }
-            let count = used / MemoryLayout<Int32>.stride
-            guard count >= capacity else { return Array(buffer.prefix(count)) }
+            let written = Int(proc_listallpids(&buffer, Int32(capacity * MemoryLayout<Int32>.stride)))
+            guard written > 0 else { return [] }
+            guard written >= capacity else { return Array(buffer.prefix(written)) }
             capacity *= 2
         }
         return []

@@ -1,3 +1,7 @@
+// File-level plumbing shared by the append-only logs: rotation, append-only descriptors, safe
+// writes and a shared ISO 8601 stamp.
+
+import Darwin
 import Foundation
 
 /// File-level plumbing shared by the append-only logs.
@@ -7,16 +11,48 @@ enum LogFile {
     /// Returns nil when the file cannot be opened at all; log writes are best effort and must never
     /// take the caller down with them.
     static func openForAppending(_ url: URL, rotatingBeyond limit: Int) -> FileHandle? {
+        rotateIfNeeded(url, beyond: limit)
         let manager = FileManager.default
-        if let size = try? manager.attributesOfItem(atPath: url.path)[.size] as? Int, size > limit {
-            try? manager.removeItem(at: url)
-        }
         if !manager.fileExists(atPath: url.path) {
             manager.createFile(atPath: url.path, contents: nil)
         }
         guard let handle = try? FileHandle(forWritingTo: url) else { return nil }
         _ = try? handle.seekToEnd()
         return handle
+    }
+
+    /// Opens `url` with kernel-level append semantics, without rotating it.
+    ///
+    /// `O_APPEND` is what makes several writers safe: the child service holds one descriptor for its
+    /// whole life while the shell opens another for occasional notes. With the plain `forWritingTo:`
+    /// handle both would keep a private offset, so a note written after the service's last write
+    /// would land on top of it. Writes through an `O_APPEND` descriptor always land at the current
+    /// end of file, from either descriptor.
+    /// - Returns: a writable handle, or `nil` when the file cannot be opened.
+    static func openAppendOnly(_ url: URL) -> FileHandle? {
+        let descriptor = open(url.path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+        guard descriptor >= 0 else { return nil }
+        return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    }
+
+    /// Opens `url` for append-only writing, rotating it first once it has grown past `limit` bytes.
+    ///
+    /// Rotation must only happen before a child inherits the descriptor: deleting the file under a
+    /// running service leaves it writing to an unlinked inode while the shell writes to a new one.
+    static func openAppendOnly(_ url: URL, rotatingBeyond limit: Int) -> FileHandle? {
+        rotateIfNeeded(url, beyond: limit)
+        return openAppendOnly(url)
+    }
+
+    /// Removes `url` once it has grown past `limit` bytes, when its size can be read.
+    private static func rotateIfNeeded(_ url: URL, beyond limit: Int) {
+        let manager = FileManager.default
+        guard let size = try? manager.attributesOfItem(atPath: url.path)[.size] as? Int,
+              size > limit
+        else {
+            return
+        }
+        try? manager.removeItem(at: url)
     }
 
     /// Appends `data` to `handle`, swallowing whatever the disk answers.

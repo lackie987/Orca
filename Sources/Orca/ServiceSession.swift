@@ -1,3 +1,6 @@
+// The private reconnect record: which pid and tokenized URL the last launch left behind. Its disk
+// I/O is shared with the discoverable endpoint through `ServiceRecordStore`.
+
 import Foundation
 
 /// A service that outlived the previous Orca launch and can be adopted again.
@@ -16,37 +19,27 @@ struct ServiceSession: Codable {
 
 /// Reads and writes the private session record used to reconnect to a kept-alive service.
 enum ServiceSessionStore {
+    /// The last recorded session, or `nil` when the file is missing or stale.
     static func load() -> ServiceSession? {
-        guard let data = try? Data(contentsOf: AppPaths.serviceSession) else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(ServiceSession.self, from: data)
+        ServiceRecordStore.load(ServiceSession.self, from: AppPaths.serviceSession)
     }
 
+    /// Atomically publishes `session` with private permissions.
     static func save(_ session: ServiceSession) {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(session) else { return }
-        try? data.write(to: AppPaths.serviceSession, options: .atomic)
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: AppPaths.serviceSession.path
-        )
+        ServiceRecordStore.save(session, to: AppPaths.serviceSession)
     }
 
+    /// Forgets the private record. Only a stopped or confirmed-dead service should reach this.
     static func clear() {
-        try? FileManager.default.removeItem(at: AppPaths.serviceSession)
+        ServiceRecordStore.clear(AppPaths.serviceSession)
     }
 
-    /// Whether a loaded session still describes the process its pid points at.
-    ///
-    /// Both facts have to hold: the start time must have been recorded (older records have none) and
-    /// the kernel must still report that time for the pid. Anything less means the pid may belong to
-    /// someone else, so the caller must not adopt — and, more importantly, must never signal it.
-    /// - Parameter session: the record read from disk.
-    /// - Returns: `true` only when the pid provably names the recorded process.
-    static func matchesLiveProcess(_ session: ServiceSession) -> Bool {
-        guard let recorded = session.processStartedAt else { return false }
-        return ProcessIdentity.matches(pid: session.pid, recorded: recorded)
-    }
+    // Dead code: adoption now identifies the service by the process that actually owns the port,
+    // so a recorded start time is written but no longer compared. Restore this check if adoption
+    // ever has to trust a pid again (a portless transport, say) — signalling a reused pid without
+    // it can terminate an unrelated process.
+    // static func matchesLiveProcess(_ session: ServiceSession) -> Bool {
+    //     guard let recorded = session.processStartedAt else { return false }
+    //     return ProcessIdentity.matches(pid: session.pid, recorded: recorded)
+    // }
 }

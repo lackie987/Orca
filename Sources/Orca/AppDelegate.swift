@@ -4,7 +4,8 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let preferences = Preferences.shared
     private lazy var hotkeys = GlobalHotkeyCenter.shared
-    private var service: ServiceController!
+    /// The service chain this launch owns. Started in `main.swift`, before AppKit comes up.
+    private let service: ServiceController
     private var windowController: MainWindowController!
     private var settingsController: SettingsWindowController?
     /// The panel of the separate dsh-superagent service; built on first use and kept so the window
@@ -14,48 +15,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var appearanceObserver: NSObjectProtocol?
     /// Set while the termination sequence is in flight, so a second request is not answered twice.
     private var isTerminating = false
+    /// Whether the launch's native tail (hotkeys, appearance observer, icon pass) has run.
+    private var didRunLaunchTail = false
+
+    /// - Parameter service: the service chain, already started and possibly already answering.
+    init(service: ServiceController) {
+        self.service = service
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        service = ServiceController(preferences: preferences)
+        LaunchTrace.mark("launch")
         windowController = MainWindowController(service: service, preferences: preferences)
-        MainMenu.install(appDelegate: self, window: windowController, copy: preferences.copy)
-
-        // The Carbon surface is ready, but no slot is bound: DSH's desktop shortcut service
-        // records and owns these combinations, and a native placeholder would intercept them.
-        hotkeys.prepare()
-
         windowController.showWindow(nil)
+        MainMenu.install(appDelegate: self, window: windowController, copy: preferences.copy)
+        LaunchTrace.mark("menu")
+
         windowController.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        // In system mode the icon's light/dark plane follows the Mac, not the page theme. The shell
-        // pins `NSApp.appearance` to the web theme, so AppKit's appearance KVO would answer the
-        // page; the distributed system notification is the one that answers the machine.
-        appearanceObserver = DistributedNotificationCenter.default.addObserver(
-            forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            // Two ways the Mac's own switch moves the icon: `system` mode paints from the icon's
-            // planes, and `theme` mode paints from the page — but a page whose theme source is
-            // `system` only flips when its own repaint lands, which can be late or never while the
-            // window is not drawing. Re-resolving here covers both, from the side's remembered base.
-            let followsMac = AppIcon.followsSystemAppearance(self.preferences)
-                || (AppIcon.followsTheme(self.preferences) && AppIcon.pageFollowsSystem(self.preferences))
-            guard followsMac else { return }
-            AppIconInstaller.applyCurrent(self.preferences, forApp: Bundle.main.bundlePath)
-            // The page asked for nothing here: the Mac flipped. Tell the settings row so its
-            // preview follows the Dock instead of waiting for the next read.
-            self.windowController.pushAppIconState()
+        // Everything left in this launch is native work that has nothing to ask of the page: the
+        // hotkey surface, the appearance observer and the icon pass (a picture read, an encode and,
+        // when the icon changed, a re-sign). It runs the moment the service answers — the page's
+        // document is already on its way by then — and a backstop runs it anyway if no answer ever
+        // comes, so a service that never starts still gets a menu, hotkeys and an icon.
+        windowController.onServiceAnswered = { [weak self] in self?.runLaunchTail() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.launchTailDeadline) { [weak self] in
+            self?.runLaunchTail()
         }
+    }
 
-        // Resolve the saved preset into the bundle's icon file too, not just the Dock tile: that
-        // file is what Finder, the next launch and the startup surface read, so leaving it behind
-        // is what made a chosen icon look like it had never been saved.
-        AppIconInstaller.applyCurrent(preferences, forApp: Bundle.main.bundlePath)
+    /// Longest the launch's native tail waits for the service's first answer.
+    private static let launchTailDeadline: TimeInterval = 0.8
 
-        service.start()
+    /// Runs the launch's remaining native work once, whoever asks first.
+    private func runLaunchTail() {
+        guard !didRunLaunchTail else { return }
+        didRunLaunchTail = true
+        { [weak self] in
+            guard let self else { return }
+            // The Carbon surface is ready, but no slot is bound: DSH's desktop shortcut service
+            // records and owns these combinations, and a native placeholder would intercept them.
+            self.hotkeys.prepare()
+
+            // In system mode the icon's light/dark plane follows the Mac, not the page theme. The
+            // shell pins `NSApp.appearance` to the web theme, so AppKit's appearance KVO would
+            // answer the page; the distributed system notification is the one that answers the
+            // machine.
+            self.appearanceObserver = DistributedNotificationCenter.default.addObserver(
+                forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                // Two ways the Mac's own switch moves the icon: `system` mode paints from the icon's
+                // planes, and `theme` mode paints from the page — but a page whose theme source is
+                // `system` only flips when its own repaint lands, which can be late or never while
+                // the window is not drawing. Re-resolving here covers both, from the side's
+                // remembered base.
+                let followsMac = AppIcon.followsSystemAppearance(self.preferences)
+                    || (AppIcon.followsTheme(self.preferences) && AppIcon.pageFollowsSystem(self.preferences))
+                guard followsMac else { return }
+                AppIconInstaller.applyCurrent(self.preferences, forApp: Bundle.main.bundlePath)
+                // The page asked for nothing here: the Mac flipped. Tell the settings row so its
+                // preview follows the Dock instead of waiting for the next read.
+                self.windowController.pushAppIconState()
+            }
+
+            // Resolve the saved preset into the bundle's icon file too, not just the Dock tile: that
+            // file is what Finder, the next launch and the startup surface read, so leaving it behind
+            // is what made a chosen icon look like it had never been saved.
+            AppIconInstaller.applyCurrent(self.preferences, forApp: Bundle.main.bundlePath)
+            LaunchTrace.mark("icon")
+        }()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -175,5 +207,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openProjectPage(_ sender: Any?) {
         guard let url = URL(string: "https://github.com/deepseek-ai/deepseek-harness") else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    /// The File menu's close action, applied to whichever window is key.
+    ///
+    /// Not `performClose:`: that action simulates a click on the standard close button, and the main
+    /// window keeps its traffic lights hidden behind the page's own title band, which leaves that
+    /// button disabled — the item then ran a silent no-op, with no prompt and no close. The main
+    /// window goes through its own guard; every other window simply closes.
+    @objc func closeWindow(_ sender: Any?) {
+        guard let target = NSApp.keyWindow ?? windowController?.window else { return }
+        if let guarded = target.delegate as? MainWindowController {
+            guarded.requestClose()
+        } else {
+            target.close()
+        }
     }
 }
