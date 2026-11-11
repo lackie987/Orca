@@ -51,6 +51,12 @@ final class ServiceController {
     // Restore it if teardown ever needs to inspect the adopted listener without the watchdog.
     // private var adoptedPort: Int?
 
+    /// Serializes the reconnect-record writes.
+    ///
+    /// The launch path publishes one record and the service's banner later republishes it with the
+    /// minted token URL; both are background writes, and the file has to end up with the newer one.
+    private static let recordQueue = DispatchQueue(label: "com.xu.orca.service-records", qos: .utility)
+
     /// Longest a launch may stay in `.starting` before the window reports a timeout.
     private static let startupDeadline: TimeInterval = 45
     /// PATH prefix for the login shell: GUI-launched apps do not inherit a terminal PATH.
@@ -142,8 +148,12 @@ final class ServiceController {
     /// reusing it later is the whole point of keeping it alive. Static so the termination path can
     /// call it from a background queue without retaining the controller.
     private static func forgetServiceRecord() {
-        ServiceSessionStore.clear()
-        ServiceEndpointStore.clear()
+        // On the record queue, so a write that is still in flight cannot land on top of the clear and
+        // leave a record for a service this launch just let go.
+        recordQueue.sync {
+            ServiceSessionStore.clear()
+            ServiceEndpointStore.clear()
+        }
     }
 
     /// Stops the service for application termination unless the user keeps it alive between launches.
@@ -464,9 +474,11 @@ final class ServiceController {
                 self.adoptionTimer = nil
                 self.adoptedTrusted = true
                 self.adoptedPid = owner
-                self.publishEndpoint(url: url, pid: owner)
                 self.state = .ready(url)
                 self.watchAdoptedService(pid: owner, port: port)
+                // After the hand-off: both records serve the *next* launch, and writing them first
+                // meant three file operations plus a kernel start-time read in front of the page.
+                self.publishEndpoint(url: url, pid: owner)
                 return
             }
             // No usable owner: either the scan has not answered yet, or it named a process that is
@@ -547,25 +559,27 @@ final class ServiceController {
 
     /// Publishes the reachable URL in both records, preserving the token's original issue time.
     private func publishEndpoint(url: URL, pid: Int32) {
-        let startedAt = ProcessIdentity.startTime(of: pid)
-        ServiceSessionStore.save(
-            ServiceSession(
-                pid: pid,
-                url: url.absoluteString,
-                startedAt: Date(),
-                processStartedAt: startedAt
+        Self.recordQueue.async {
+            let startedAt = ProcessIdentity.startTime(of: pid)
+            ServiceSessionStore.save(
+                ServiceSession(
+                    pid: pid,
+                    url: url.absoluteString,
+                    startedAt: Date(),
+                    processStartedAt: startedAt
+                )
             )
-        )
-        let existing = ServiceEndpointStore.load()
-        let issuedAt = existing?.url == url.absoluteString ? (existing?.issuedAt ?? Date()) : Date()
-        ServiceEndpointStore.save(
-            ServiceEndpoint(
-                pid: pid,
-                url: url.absoluteString,
-                processStartedAt: startedAt,
-                issuedAt: issuedAt
+            let existing = ServiceEndpointStore.load()
+            let issuedAt = existing?.url == url.absoluteString ? (existing?.issuedAt ?? Date()) : Date()
+            ServiceEndpointStore.save(
+                ServiceEndpoint(
+                    pid: pid,
+                    url: url.absoluteString,
+                    processStartedAt: startedAt,
+                    issuedAt: issuedAt
+                )
             )
-        )
+        }
     }
 
     // MARK: - Spawning

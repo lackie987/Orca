@@ -68,6 +68,10 @@ final class WebPageController: NSObject, InspectorPage {
     /// Tokenized URL currently loaded; `nil` until the shell hands one over.
     private(set) var accessURL: URL?
 
+    /// Signature of the scripts currently installed in the web view, so a reload can skip
+    /// reinstalling them when nothing that feeds them changed.
+    private var installedScriptsSignature: String?
+
     /// Snapshot of the origin being left, replayed when the next one is served on another port.
     private var pendingStorage: WebPageStorage.Snapshot?
 
@@ -114,6 +118,7 @@ final class WebPageController: NSObject, InspectorPage {
             bootFont: ProfileFont.family(profile: preferences.profile),
             disableInputCompletion: preferences.disableInputCompletion
         )
+        installedScriptsSignature = scriptsSignature
         installBridges(on: userContentController)
 
         applyPreferences()
@@ -266,6 +271,11 @@ final class WebPageController: NSObject, InspectorPage {
     /// The startup background is baked into a `WKUserScript`; without this a page reload (or a
     /// service restart) would paint the colour from the last app launch, not the theme picked since.
     private func refreshUserScripts() {
+        // Runs before every navigation; rebuilding fifteen scripts to reach the same answer as last
+        // time is work the signature can skip.
+        let signature = scriptsSignature
+        guard signature != installedScriptsSignature else { return }
+        installedScriptsSignature = signature
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
         WebPageScripts.install(
@@ -274,6 +284,12 @@ final class WebPageController: NSObject, InspectorPage {
             bootFont: ProfileFont.family(profile: preferences.profile),
             disableInputCompletion: preferences.disableInputCompletion
         )
+    }
+
+    /// Everything the injected scripts depend on, as one comparable string.
+    private var scriptsSignature: String {
+        let font = ProfileFont.family(profile: preferences.profile)
+        return "\(ThemeColor.bootHex(preferences))|\(font ?? "-")|\(preferences.disableInputCompletion)"
     }
 
     /// Applies the native "disable English autocorrect & autocomplete" setting to the loaded page.

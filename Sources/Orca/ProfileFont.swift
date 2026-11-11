@@ -2,8 +2,22 @@ import Foundation
 
 /// Reads the text font from the active dsh profile so the startup page matches the app.
 enum ProfileFont {
+    /// Resolved answers, so a navigation does not re-read and re-scan the profile file.
+    ///
+    /// Read on every page load (the boot stylesheet is rebuilt per navigation), and the answer can
+    /// only change by editing the profile — which needs a restart to take effect anyway.
+    private static var resolved: [String: String?] = [:]
+
     /// Resolves the configured text font stack, or nil when the profile is unreadable.
     static func family(profile: String) -> String? {
+        if let hit = resolved[profile] { return hit }
+        let family = scan(profile: profile)
+        resolved[profile] = family
+        return family
+    }
+
+    /// Reads the profile file and pulls the first configured font stack out of it.
+    private static func scan(profile: String) -> String? {
         let home = ProcessInfo.processInfo.environment["DSH_HOME"]
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".dsh").path
         let patch = URL(fileURLWithPath: home)
