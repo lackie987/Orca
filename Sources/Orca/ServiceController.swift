@@ -672,6 +672,22 @@ final class ServiceController {
         var environment = ProcessInfo.processInfo.environment
         let searchPaths = Self.searchPath
         environment["PATH"] = searchPaths + ":" + (environment["PATH"] ?? "")
+        // Resolve symlinks in the Harness home before the backend boots. dsh's
+        // verifyDesktopPath compares a symlink-preserving path against a realpathed
+        // one, so any path under a symlinked ~/.dsh fails the check and "Show in
+        // Finder" never opens. Pointing DSH_HOME at the real path makes every path
+        // the backend computes round-trip cleanly. Override only when the resolved
+        // spelling differs, so setups without a symlink keep their default home.
+        let dshHomeInput: String
+        if let existing = environment["DSH_HOME"], !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            dshHomeInput = existing
+        } else {
+            dshHomeInput = (FileManager.default.homeDirectoryForCurrentUser.path as NSString).appendingPathComponent(".dsh")
+        }
+        let resolvedDshHome = URL(fileURLWithPath: dshHomeInput).resolvingSymlinksInPath().path
+        if resolvedDshHome != dshHomeInput {
+            environment["DSH_HOME"] = resolvedDshHome
+        }
         child.environment = environment
         child.standardOutput = log
         child.standardError = log
